@@ -252,8 +252,13 @@ class RuntimeObserver:
         self.log(msg_eval)
 
     def get_best(self, epoch):
-        """Record best metrics."""
+        """Record best metrics (validation) and snapshot train metrics at this epoch.
+
+        除记录验证集最佳指标外，同时快照该最佳轮的训练集指标与验证集 Loss，
+        供 MetricsRecorder 写入 best_results.csv（train + val 并排）。
+        """
         self.best_dicts['epoch'] = epoch
+        # ---- 验证集（最佳轮）----
         self.best_dicts['confusionMatrix'] = self.eval_metric['confusionMatrix'].cpu().numpy()
         self.best_dicts['Accuracy'] = self.eval_metric['Accuracy']
         self.best_dicts['Recall'] = self.eval_metric['Recall']
@@ -263,6 +268,18 @@ class RuntimeObserver:
         self.best_dicts['F1'] = self.eval_metric['F1']
         self.best_dicts['CohenKappa'] = self.eval_metric['CohenKappa']
         self.best_dicts['AuRoc'] = self.eval_auc
+        self.best_dicts['val_Loss'] = self.average_eval_loss
+        # ---- 训练集（同一最佳轮快照）----
+        self.best_dicts['train_confusionMatrix'] = self.train_metric['confusionMatrix'].cpu().numpy()
+        self.best_dicts['train_Accuracy'] = self.train_metric['Accuracy']
+        self.best_dicts['train_Recall'] = self.train_metric['Recall']
+        self.best_dicts['train_Precision'] = self.train_metric['Precision']
+        self.best_dicts['train_Specificity'] = self.train_metric['Specificity']
+        self.best_dicts['train_BalanceAccuracy'] = self.train_balance_accuracy
+        self.best_dicts['train_F1'] = self.train_metric['F1']
+        self.best_dicts['train_CohenKappa'] = self.train_metric['CohenKappa']
+        self.best_dicts['train_AuRoc'] = self.train_auc
+        self.best_dicts['train_Loss'] = self.average_train_loss
 
     def execute(self, e, epochs, train_len, eval_len, fold, model=None):
         """Compute metrics, print, check early stopping, and save best model."""

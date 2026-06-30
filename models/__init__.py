@@ -7,3 +7,8 @@ from models.get_model import *
 from models.efficientvit import *
 from models.build_efficientVit import *
 from models.metaformer import *
+from models.lstm import *
+from models.transformer_encoder import *
+from models.mamba_model import *
+from models.protonet import *
+from models.relationnet import *

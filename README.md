@@ -1,494 +1,406 @@
----
-date: 2025-11-22T18:46:00  
-tags:
-  - python
-  - deep learning
----
-
-
+# Fatigue-Contrast: 跨对象疲劳检测对比实验框架
 
 <p align="center">
-  <img src="https://capsule-render.vercel.app/api?type=waving&height=240&text=📦Deep%20Learning%20Classification%20Project&fontSize=40&fontAlign=50&fontColor=28F2E6&color=0:9AD6FF,50:C1A6FF,100:CFF7E6&desc=A%20Clean%20and%20Flexible%20PyTorch%20Classification%20Pipeline&descAlign=50&descAlignY=78&descSize=18&descColor=C8EFF0&animation=twinkling"/>
+  <img src="https://capsule-render.vercel.app/api?type=waving&height=200&text=Fatigue%20Detection%20Baselines&fontSize=36&fontAlign=50&fontColor=28F2E6&color=0:0B2447,50:5B2B8A,100:00A586&desc=Cross-Subject%20Fatigue%20Detection%20Contrast%20Experiments&descAlign=50&descAlignY=78&descSize=16&descColor=B1FBE4&animation=twinkling"/>
 </p>
-
-
-
-
 
 <p align="center">
-  <img src="https://capsule-render.vercel.app/api?type=waving&height=240&text=📦Deep%20Learning%20Classification%20Project&fontSize=42&fontAlign=50&fontColor=C7FFF0&color=0:7AD0FF,50:8A6BFF,100:8EF6C2&desc=A%20Clean%20and%20Flexible%20PyTorch%20Classification%20Pipeline&descAlign=50&descAlignY=78&descSize=20&descColor=D6C8F9&animation=twinkling"/>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/Python-3.8+-blue.svg" alt="Python"></a>
+  <a href="https://pytorch.org/"><img src="https://img.shields.io/badge/PyTorch-2.0+-orange.svg" alt="PyTorch"></a>
+  <a href="https://github.com/state-spaces/mamba"><img src="https://img.shields.io/badge/Mamba--SSM-2.0+-green.svg" alt="Mamba"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License"></a>
 </p>
-
-
-
-<p align="center">
-  <img src="https://capsule-render.vercel.app/api?type=waving&height=240&text=📦Deep%20Learning%20Classification%20Project&fontSize=42&fontAlign=50&fontColor=7FFFD4&color=0:0B2447,50:5B2B8A,100:00A586&desc=A%20Clean%20and%20Flexible%20PyTorch%20Classification%20Pipeline&descAlign=50&descAlignY=78&descSize=18&descColor=B1FBE4&animation=twinkling"/>
-</p>
-
-
-
-
-# 🌟 Deep Learning Image Classification Templates (PyTorch)
-
-
-
-> **简洁 · 可扩展 · 工业级** —— 一个为研究与部署而生的通用图像分类项目模板。
 
 ---
 
-## 📌 1. 项目简介
+## 📖 项目简介
 
-这是一个基于 **PyTorch** 构建的**通用深度学习图像分类框架**，专为快速实验、模型对比与生产部署设计。项目提供：
+本项目是**跨对象（Cross-Subject）疲劳检测**的对比实验框架，基于 PyTorch 构建。实现了多种经典基线方法，用于与本文提出的 SelfNet 方法进行性能对比。
 
-- ✅ 多种主流视觉模型（ResNet, EfficientNet, EfficientViT, MetaFormer 等）  
-- ✅ K-Fold 交叉验证支持  
-- ✅ 灵活的数据加载（List 文件 / 文件夹格式）  
-- ✅ 完善的日志记录、指标监控与训练可视化（TensorBoard + SwanLab）  
-- ✅ 开箱即用的训练、测试与推理脚本
-- ✅ **完整的可复现性保证**（全局随机种子设置）  
+### 支持的基线方法
 
-无论你是学术研究者、算法工程师，还是刚入门深度学习的新手，该项目都能为你提供清晰、模块化且易于维护的代码基础。
+| 类别 | 模型 | 说明 |
+|:---:|:---:|:---|
+| **时序分类** | LSTM | 长短时记忆网络，经典的时序建模方法 |
+| | Transformer | 基于自注意力的时序编码器 |
+| | Mamba | 基于选择性状态空间模型（S4/S6），线性复杂度的时序建模 |
+| **小样本学习** | ProtoNet | 原型网络，基于欧氏距离的度量学习 |
+| | RelationNet | 关系网络，基于可学习关系模块的度量学习 |
 
 ---
 
-## 🗂️ 2. 目录结构
+## 📂 项目结构
 
 ```text
-project/
-├── configs/           
-│   ├── config.py              # 全局配置解析与默认参数定义
-│   └── experiments_object.py  # 实验配置字典
-├── data/              
-│   └── dataset.py             # 数据集加载器（支持 List 和 Folder 格式 + 增强策略）
-├── models/            
-│   ├── get_model.py           # 模型工厂函数（统一入口）
-│   ├── ResNet.py
-│   ├── EfficientNet.py
-│   └── ...                    # 支持无缝添加新架构
-├── engine/            
-│   └── trainer.py             # 训练/验证核心逻辑（含早停、调度器等）
-├── experiment_results/        # 记录每次实验的日志
+Fatigue-Contrast-exp/
+├── configs/
+│   ├── config.py                     # 原始模板配置
+│   ├── experiments_object.py         # 原始模板实验字典
+│   ├── fatigue_temporal_baselines.py # 时序基线配置 (LSTM/Transformer/Mamba)
+│   └── fatigue_fewshot_baselines.py  # 小样本基线配置 (ProtoNet/RelationNet)
+├── data/
+│   ├── dataset.py                    # 原始图像数据集
+│   └── fatigue_dataset.py            # 疲劳检测数据集 (JSONL 滑动窗口)
+├── models/
+│   ├── get_model.py                  # 模型工厂（统一入口）
+│   ├── lstm.py                       # LSTM 分类器
+│   ├── transformer_encoder.py        # Transformer Encoder 分类器
+│   ├── mamba_model.py                # Mamba 分类器 (基于 mamba-ssm)
+│   ├── protonet.py                   # Prototypical Networks
+│   ├── relationnet.py                # Relation Network
+│   └── ...                           # 原始模板模型 (ResNet/EfficientNet 等)
+├── engine/
+│   └── trainer.py                    # 原始模板训练器
 ├── utils/
-│   ├── basic.py               # 学习率调度、设备设置等基础工具
-│   ├── loss_function.py       # 自定义损失函数
-│   ├── model_stats.py         # 模型参数与 FLOPs 计算工具
-│   ├── observer.py            # 日志记录、指标跟踪、实验可视化
-│   ├── swanlab_logger.py      # SwanLab 实验跟踪模块（可选）
-│   └── reproducibility.py     # 可复现性工具（随机种子设置）
-├── main.py                    # 主训练入口
-├── README.md                  # 你正在阅读的文档 ❤️
-├── infer.py                   # 单图/批量推理脚本
-├── test.py                    # 模型评估脚本
-└── requirements.txt           # 依赖管理
-
+│   ├── basic.py                      # 优化器/学习率调度器
+│   ├── loss_function.py              # 损失函数
+│   ├── observer.py                   # 指标监控/日志/早停
+│   ├── reproducibility.py            # 可复现性工具
+│   └── swanlab_logger.py             # SwanLab 实验跟踪
+├── main.py                           # 原始模板训练入口
+├── main_fatigue.py                   # 疲劳检测训练入口 ⭐
+├── test.py                           # 模型评估脚本
+├── infer.py                          # 推理脚本
+├── requirements.txt                  # 依赖清单
+└── README.md                         # 本文档
 ```
 
 ---
 
-## 🛠 3. 环境依赖
+## 🛠️ 环境安装
 
-确保你的环境满足以下要求：
-
-- **Python ≥ 3.8**
-- **PyTorch ≥ 1.10**
-- **torchvision**
-- **scikit-learn**（用于 K-Fold 划分）
-- **Pillow**（图像处理）
-- **NumPy**
-- **tqdm**（用于进度条显示）
-- **tensorboard**（实验可视化）
-- **matplotlib, seaborn**（用于保存混淆矩阵可视化）
-- **ptflops**（用于计算模型 FLOPs / MACs）
-- **swanlab**（可选，用于云端实验跟踪）
-
-推荐使用 `conda` 或 `venv` 创建独立环境：
+### 基础环境
 
 ```bash
+# 创建虚拟环境
+conda create -n fatigue python=3.10
+conda activate fatigue
+
+# 安装 PyTorch (根据你的 CUDA 版本选择)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
 # 安装核心依赖
-pip install torch torchvision scikit-learn pillow numpy tqdm tensorboard matplotlib seaborn ptflops
+pip install torchmetrics numpy scikit-learn Pillow tqdm tensorboard matplotlib seaborn PyYAML
+```
 
-# （可选）安装 SwanLab 用于实验跟踪
+### 安装 Mamba (Linux + CUDA)
+
+Mamba 需要 CUDA 环境编译，**仅支持 Linux**：
+
+```bash
+# 安装 causal-conv1d
+pip install causal-conv1d
+
+# 安装 mamba-ssm
+pip install mamba-ssm
+```
+
+> ⚠️ **注意**: `mamba-ssm` 需要 CUDA toolkit 和对应版本的 PyTorch。如果安装失败，请参考 [mamba-ssm 官方文档](https://github.com/state-spaces/mamba)。
+
+### 可选依赖
+
+```bash
+# 模型 FLOPs 计算
+pip install ptflops
+
+# 实验跟踪
 pip install swanlab
 
-# 或使用 requirements.txt 一键安装所有依赖
+# PoolFormer 等模型
+pip install timm
+
+# 一键安装全部依赖
 pip install -r requirements.txt
-
 ```
----
-
-## 🚀 4. 快速开始
-
-### 1️⃣ 4.1 数据准备
-
-项目默认支持 **List 文件格式**（每行：`图像路径 类别ID`）：
-
-以`Oxford 102 Flowers`数据集为例：
-
-
-
-```text
-/path/to/flower_001.jpg 0
-/path/to/flower_042.jpg 1
-...
-```
-
-准备 `train.txt` 和 `test.txt`（或仅 `train.txt`，内部自动划分验证集）。
-
-> 💡 提示：类别 ID 应为从 `0` 开始的连续整数。
 
 ---
 
-### 2️⃣ 4.2 启动训练
+## 📊 数据格式
 
-项目采用**字典配置驱动**的方式管理实验。所有的实验配置都集中在 `configs/experiments_object.py` 文件中。
+数据为 JSONL 文件，每个文件代表一个受试者的一次实验：
 
-#### 🔹 步骤 1：定义实验配置
-打开 `configs/experiments_object.py`，在 `experiments` 字典中添加你的实验配置。你可以复制现有的配置并修改参数：
+```
+[id]_[easy|hard]_[alert|sleepy].jsonl
+```
 
-```python
-experiments = {
-    "My_New_Experiment": {
-        # Model
-        "model": resnet50,  # 直接引用模型类
-        "num_classes": 10,
-        
-        # Dataset
-        "dataset": MyCustomDataset, # 直接引用数据集类
-        "data_dir": "/path/to/data",
-        
-        # Training
-        "batch_size": 32,
-        "lr": 1e-3,
-        "epochs": 100,
-        # ... 其他参数
-    }
+示例：
+```
+001_easy_alert.jsonl
+002_hard_sleepy.jsonl
+```
+
+每行是一帧数据，包含 `deviation_px_after_calibrate` 等特征：
+
+```json
+{
+  "timestamp": 4.16,
+  "frame_idx": 100,
+  "deviation_px_after_calibrate": 13.19,
+  ...
 }
 ```
 
-#### 🔹 步骤 2：运行实验
-使用 `--exp_name` 参数指定你要运行的实验名称：
-
-```bash
-python main.py --exp_name My_New_Experiment
+数据目录结构：
+```
+data_dir/
+├── 001_easy_alert.jsonl
+├── 001_hard_alert.jsonl
+├── 001_easy_sleepy.jsonl
+├── 002_easy_alert.jsonl
+└── ...
 ```
 
-程序会自动加载字典中定义的所有参数（模型、数据集、优化器、超参数等），并覆盖默认配置。
+---
 
-**✨ 可复现性保证：**
-- 程序会自动使用配置中的 `seed` 参数设置全局随机种子
-- 输出会显示：`✅ Global random seed set to: XXX`
-- 相同配置的多次运行将产生完全相同的结果
+## 🚀 快速开始
+
+### 1️⃣ 修改配置
+
+打开对应的配置文件，修改以下关键参数：
 
 ```python
-# 配置示例（包含 seed）
-"My_Experiment": {
-    "seed": 42,  # 随机种子，确保可复现性
-    "model_name": "resnet34",
-    "batch_size": 64,
-    # ... 其他参数
+# configs/fatigue_temporal_baselines.py 或 configs/fatigue_fewshot_baselines.py
+
+# 数据目录（修改为你服务器上的实际路径）
+"data_dir": "/your/path/to/jsonl/data",
+
+# 任务难度过滤
+"difficulty": "easy",   # "easy" / "hard" / None(全部)
+
+# 测试集受试者ID（可选，None 表示无独立测试集）
+"test_ids": ["010", "011"],
+
+# 验证策略
+"val_strategy": "kfold",  # "kfold"（手动指定）/ "loso"（自动留一）
+
+# K-Fold 配置（每个 fold 指定验证集受试者ID，loso 模式下不需要）
+"folds": {
+    1: {"val_ids": ["001", "002"]},
+    2: {"val_ids": ["003", "004"]},
+    3: {"val_ids": ["005", "006"]},
+},
+
+# GPU 设备
+"device": "cuda:0",
+```
+
+### 2️⃣ 训练
+
+```bash
+# LSTM 基线
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline
+
+# Transformer 基线
+python main_fatigue.py --exp_name Fatigue_Transformer_baseline
+
+# Mamba 基线
+python main_fatigue.py --exp_name Fatigue_Mamba_baseline
+
+# ProtoNet 基线
+python main_fatigue.py --exp_name Fatigue_ProtoNet_baseline
+
+# RelationNet 基线
+python main_fatigue.py --exp_name Fatigue_RelationNet_baseline
+```
+
+### 3️⃣ 输出
+
+每次训练会在 `output_dir` 下生成带时间戳的目录：
+
+```
+result_20260629_143000_Fatigue_LSTM_baseline/
+├── config.yaml                    # 当前实验的完整配置（自动保存）
+├── best_model_fold1.pth           # Fold 1 最佳模型
+├── best_model_fold2.pth           # Fold 2 最佳模型
+├── best_model_fold3.pth           # Fold 3 最佳模型
+├── best_results.csv               # ⭐ 各 fold 最佳轮 train+val 指标（含 mean/std）
+├── history_fold01.csv             # ⭐ Fold 1 每轮 train/val/test 指标（实时追加）
+├── history_fold02.csv             # ⭐ Fold 2 每轮 train/val/test 指标（实时追加）
+├── history_fold03.csv             # ⭐ Fold 3 每轮 train/val/test 指标（实时追加）
+├── summary/                       # TensorBoard 日志
+└── log.txt                        # 训练日志
+```
+
+如果配置了 `test_ids`，训练完成后会自动加载每个 fold 的模型进行批量测试评估，并输出汇总结果。
+
+#### 📄 指标 CSV 文件说明
+
+| 文件 | 内容 |
+|:---|:---|
+| `history_fold{N}.csv` | 每个 fold / LOSO **单独一个文件**，**每训练一轮实时追加** train + val 指标到文件末尾（测试评估完成后再追加 test 行）。长表格式，`split` 列区分 `train` / `val` / `test`，`is_best` 列标记该轮是否为当前 fold 的最佳轮；混淆矩阵按位置展平为 `cm_00 / cm_01 / cm_10 / cm_11` 四个独立列。即使训练中途中断，已完成的轮次指标也不会丢失。 |
+| `best_results.csv` | 每个 fold / LOSO **最佳轮**的训练集 + 验证集全部指标（宽表，`train_*` / `val_*` 并排），每折完成时实时追加一行；全部 fold 结束后追加 `mean` / `std` 汇总行。 |
+
+---
+
+## ⚙️ 配置说明
+
+### 通用配置（所有模型共用）
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---:|
+| `data_dir` | JSONL 数据目录 | 必填 |
+| `difficulty` | 任务难度过滤 | `None`（全部） |
+| `test_ids` | 测试集受试者ID列表 | `None` |
+| `val_strategy` | 验证策略 | `"kfold"` |
+| `folds` | K-Fold 验证集配置（loso 模式下忽略） | `{}` |
+| `feature_name` | 使用的特征字段 | `"deviation_px_after_calibrate"` |
+| `window_size` | 滑动窗口大小（帧数） | 30 |
+| `stride` | 滑动窗口步长 | 15 |
+| `batch_size` | 批大小 | 32 |
+| `epochs` | 最大训练轮数 | 100 |
+| `patience` | 早停耐心值 | 20 |
+| `lr` | 学习率 | 1e-3 |
+| `lr_policy` | 学习率调度策略 | `"onecycle"` |
+| `device` | GPU 设备 | `"cuda:0"` |
+| `seed` | 随机种子 | 42 |
+
+### 时序基线特有参数 (LSTM / Transformer / Mamba)
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---:|
+| `hidden_size` | LSTM 隐藏层维度 | 64 |
+| `num_layers` | LSTM/Transformer 层数 | 2 |
+| `d_model` | Transformer/Mamba 模型维度 | 64 |
+| `nhead` | Transformer 注意力头数 | 4 |
+| `d_state` | Mamba SSM 状态维度 | 16 |
+
+### 小样本基线特有参数 (ProtoNet / RelationNet)
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---:|
+| `hidden_size` | 编码器隐藏层维度 | 64 |
+| `embedding_size` | 嵌入空间维度 | 32 |
+| `n_way` | 每个 episode 的类别数 | 2 |
+| `k_shot` | 支持集样本数/类别 | 5 |
+| `n_query` | 查询集样本数/类别 | 10 |
+| `episodes_per_epoch` | 每个 epoch 的 episode 数 | 100 |
+
+### 任务难度过滤
+
+数据文件名格式为 `[id]_[easy|hard]_[alert|sleepy].jsonl`，通过 `difficulty` 参数控制使用哪类数据：
+
+```python
+"difficulty": "easy",   # 仅使用 easy 任务数据
+"difficulty": "hard",   # 仅使用 hard 任务数据
+"difficulty": None,     # 使用全部数据（easy + hard）
+```
+
+### 验证策略
+
+通过 `val_strategy` 参数切换 K-Fold 和 LOSO：
+
+**K-Fold（手动指定每折验证集）：**
+```python
+"val_strategy": "kfold",   # 或不写，默认就是 kfold
+"test_ids": ["010", "011"],
+"folds": {
+    1: {"val_ids": ["001", "002"]},  # Fold 1: 001,002 做验证
+    2: {"val_ids": ["003", "004"]},  # Fold 2: 003,004 做验证
+    3: {"val_ids": ["005", "006"]},  # Fold 3: 005,006 做验证
 }
+# 训练集 = 全部受试者 - test_ids - 当前fold的val_ids
 ```
 
-#### 🔹 为什么使用字典配置？
-- **集中管理**：所有实验的超参数一目了然，方便对比和复现。
-- **灵活性**：可以直接在配置中引用 Python 对象（如模型类、数据集类、优化器类），而不仅仅是字符串。
-- **版本控制**：配置文件本身就是代码的一部分，方便使用 Git 进行版本控制。
-
----
-
-### 3️⃣ 4.3 模型推理
-
-1、对单张或多张图像进行预测：
-
-```bash
-python infer.py \
-  --image img1.jpg img2.jpg \
-  --checkpoint best_model.pth \
-  --num_classes 102 \
-  --device cuda:0
-```
-
-输出示例：
-```
-./img1.jpg → class 17 (probability: 0.92)
-./img2.jpg → class 42 (probability: 0.88)
-```
-2、对文件夹中的所有图像进行批量预测：
-
-```bash
-python infer.py \
-  --folder /path/to/image/folder \
-  --checkpoint best_model.pth \
-  --num_classes 102 \
-  --device cuda:0
-```
-输出示例：
-```
-/your/image/folder/img1.jpg → class 17 (probability: 0.92)
-/your/image/folder/img2.jpg → class 42 (probability: 0.88)
-```
-
-
----
-
-## 🔄 5. 可复现性与实验管理
-
-### 🎯 完整的可复现性保证
-
-项目已实现工业级的可复现性设置，确保实验结果可以被准确复现：
-
+**LOSO（自动留一法）：**
 ```python
-# 所有随机源都被控制
-✅ Python random
-✅ NumPy random  
-✅ PyTorch CPU random
-✅ PyTorch GPU random (CUDA)
-✅ DataLoader shuffle
-✅ 数据集划分（train/val split）
-```
-
-**自动化特性：**
-- 训练脚本自动读取配置中的 `seed` 并设置全局种子
-- 数据集划分使用可复现的 Generator
-- 所有随机操作都使用相同的种子
-
-**验证方法：**
-```bash
-# 两次训练应产生相同结果
-python main.py --exp_name CIFAR10_with_resNet34  # 第一次
-python main.py --exp_name CIFAR10_with_resNet34  # 第二次（结果完全相同）
+"val_strategy": "loso",
+"test_ids": ["010", "011"],   # 可选，不参与 LOSO 划分
+# 不需要写 folds，代码自动扫描数据目录，每个受试者单独做一折验证
+# 20 个受试者（去掉 test）→ 自动生成 18 折
 ```
 
 ---
 
-## 📊 6. 实验跟踪与可视化
+## 🧠 模型架构
 
-### 6.1 TensorBoard（默认启用）
-
-项目默认使用 TensorBoard 记录训练指标。日志保存在 `<output_dir>/summary/` 目录下。
-
-**启动 TensorBoard：**
-```bash
-tensorboard --logdir=<output_dir>/summary
-```
-
-**记录的指标：**
-- 训练/验证损失
-- 准确率、F1、AUC、平衡准确率
-- Cohen's Kappa、精确率、召回率、特异度
-
----
-
-### 6.2 SwanLab（可选云端实验跟踪）
-
-[SwanLab](https://swanlab.cn) 是一个强大的实验跟踪平台，支持：
-- 📊 实时指标可视化
-- 🖼️ 样本图像自动记录
-- 🔄 K-Fold 多折实验聚合
-- 🌐 云端访问和团队协作
-
-#### ✨ 启用 SwanLab
-
-**步骤 1：安装依赖**
-```bash
-pip install swanlab
-```
-
-**步骤 2：修改实验配置**
-
-在 `configs/experiments_object.py` 中修改对应实验的配置：
-
-```python
-experiments = {
-    "CIFAR10_with_resNet34": {
-        # ... 其他配置 ...
-        
-        # ==============================================================================
-        # SwanLab Configuration (Optional Experiment Tracking)
-        # ==============================================================================
-        "use_swanlab": True,  # ✅ 启用 SwanLab
-        # "swanlab_project": "dl-classification",  # SwanLab 项目名称
-        "swanlab_description": "CIFAR10 Classification with ResNet34",  # 实验描述
-        "swanlab_num_samples": 8,  # 记录的样本图像数量
-    }
-}
-```
-
-**步骤 3：运行实验**
-```bash
-python main.py --exp_name CIFAR10_with_resNet34
-```
-
-#### 🎨 SwanLab 配置参数说明
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `use_swanlab` | `bool` | `False` | 是否启用 SwanLab 实验跟踪 |
-| `swanlab_project` | `str` | `"dl-classification"` | SwanLab 项目名称 |
-| `swanlab_description` | `str` | `"Deep Learning Classification Experiment"` | 实验描述 |
-| `swanlab_num_samples` | `int` | `8` | 自动记录的样本图像数量 |
-
-#### 🔍 SwanLab 记录内容
-
-**1. 训练指标（每个 epoch）**
-- `train/loss`, `train/accuracy`, `train/f1`, `train/auc`, `train/balance_acc`
-- `val/loss`, `val/accuracy`, `val/precision`, `val/recall`, `val/specificity`
-- `val/f1`, `val/auc`, `val/balance_acc`, `val/cohen_kappa`
-
-**2. K-Fold 支持**
-- 所有 fold 的指标记录到**同一个 SwanLab run**
-- 每个 fold 的指标带有 `fold_X/` 前缀（如 `fold_1/val/accuracy`）
-- 便于对比不同 fold 的性能差异
-
-**3. 样本图像**
-- 自动从训练集提取前 N 张图像（由 `swanlab_num_samples` 指定）
-- 图像会反归一化到 0-255 范围并显示标签
-- **K-Fold 场景**：仅在第一个 fold 记录一次，避免重复
-
-**4. 混淆矩阵**
-- 每个 fold 的最佳模型混淆矩阵
-- 归一化可视化，显示真实值 vs 预测值分布
-
-#### 🚀 查看实验结果
-
-运行训练后，终端会输出 SwanLab 实验链接：
+### LSTM
 
 ```
-✅ SwanLab initialized successfully. Project: dl-classification
-   View experiment at: https://swanlab.cn/@username/dl-classification/runs/xxx
+Input (B, W) → Linear(W→H) → LSTM(H, n_layers) → Dropout → Linear(H→C) → Logits
 ```
 
-点击链接即可在浏览器中查看：
-- 📈 指标曲线对比（支持多 fold 叠加显示）
-- 🖼️ 样本图像展示
-- 📊 混淆矩阵可视化
-- ⚙️ 完整的超参数记录
+### Transformer
 
-#### 🔧 与 TensorBoard 共存
-
-- SwanLab 和 TensorBoard **完全独立**，可同时启用
-- SwanLab 默认**关闭**（`use_swanlab: False`），不影响现有功能
-- 未安装 `swanlab` 时会优雅降级，仅打印警告而不中断训练
-
-#### 💡 最佳实践
-
-**单次实验：**
-```python
-"use_swanlab": True,
-"swanlab_num_samples": 8,  # 记录 8 张样本图像
+```
+Input (B, W) → Linear(W→D) → PosEnc → TransformerEncoder(D, nhead, n_layers)
+             → GlobalAvgPool → Dropout → Linear(D→C) → Logits
 ```
 
-**K-Fold 实验：**
-```python
-"k_fold": 5,  # 5折交叉验证
-"use_swanlab": True,  # 所有 fold 记录到同一个 run
-"swanlab_num_samples": 16,  # 只在 fold 0 记录一次
+### Mamba
+
+```
+Input (B, W) → Linear(W→D) → [MambaBlock × n_layer] → LayerNorm
+             → GlobalAvgPool → Dropout → Linear(D→C) → Logits
 ```
 
-**多实验对比：**
-- 在 SwanLab 平台上同时运行多个配置
-- 使用项目面板对比不同模型/超参数的效果
+MambaBlock 内部（来自 `mamba-ssm` 包）：
+```
+x → LayerNorm → [Linear→SiLU→Conv1d→SSM] ⊙ SiLU(gate) → Linear → Dropout + x → y
+```
 
----
+### ProtoNet
 
-## 🧠 7. 支持的模型架构
+```
+Support/Query → MLP Encoder → Embedding
+Prototype_c = mean(Embedding[class_c])
+Dist(q, c) = ||Embedding(q) - Prototype_c||₂
+Logits = -Dist → Softmax
+```
 
-| 模型 | 文件 | 特点 |
-|------|------|------|
-| **ResNet** | `ResNet.py` | 经典残差网络，稳定可靠 |
-| **EfficientNet** | `EfficientNet.py` | 高效缩放，精度/速度平衡 |
-| **EfficientViT** | `EfficientViT.py` | 轻量级 Vision Transformer |
-| **MetaFormer** | `MetaFormer.py` | 统一 CNN/Transformer 的骨干 |
-| **PoolFormer** | `PoolFormer.py` | 基于池化的纯 Transformer 替代方案 |
+### RelationNet
 
-> 所有模型均支持 ImageNet 预训练权重加载（若可用）。
-
----
-
-## 📐 8. 模型参数与 FLOPs 计算
-
-项目提供了一个轻量工具用于计算模型参数（Params）和 FLOPs（基于 MACs）：
-
-- 脚本路径：`utils/model_stats.py`
-- 依赖：`ptflops`
-
-示例用法：
-```powershell
-python -m utils.model_stats --num_classes 102 --img_size 224 --device cpu --output outputs/model_stats.txt
+```
+Support/Query → MLP Encoder → Embedding
+Prototype_c = mean(Embedding[class_c])
+Relation(q, c) = MLP([Embedding(q) || Prototype_c])
+Logits = Relation → Softmax
 ```
 
 ---
 
-## ✅ 9. 模型评估（混淆矩阵可视化）
+## 📋 模型参数量
 
-使用 `test.py` 运行模型在测试集上的评估。脚本会在指定的 `--save_dir`（脚本运行时会带时间戳生成子目录）下保存一个混淆矩阵的 PNG 图像，文件名格式类似：
-
-```
-{exp_name}_confusion_foldtest.png
-```
-
-说明：如果没有显式传入 `--exp_name` 或 observer 的 `name`，文件名前缀可能为 `None` 或 `exp`。图像默认为按真实类别行归一化的视图（显示每类的召回率分布以及每个格子的绝对样本数）。
-
-示例运行：
-
-```bash
-python test.py --data_dir /your/image/root --test_label_file_path /path/to/test.txt \
-  --checkpoint best_model.pth --batch_size 64 --num_workers 4 --num_classes 102 --save_dir ./test_outputs
-```
+| 模型 | 参数量 | 说明 |
+|:---|:---:|:---|
+| LSTM | ~71K | hidden=64, layers=2 |
+| Transformer | ~71K | d_model=64, heads=4, layers=2 |
+| Mamba | ~37K | d_model=64, layers=2, d_state=16 |
+| ProtoNet | ~8.5K | hidden=64, emb=32 |
+| RelationNet | ~9.9K | hidden=64, emb=32, relation=16 |
 
 ---
 
-## 💳 10. `experiment_results` 目录说明
+## 🔧 扩展指南
 
-用于保存每次实验的日志、模型权重和配置备份。
+### 添加新模型
 
-以`markdown`格式记录每次实验的关键指标，便于对比和复现。
+1. 在 `models/` 下创建 `your_model.py`
+2. 在 `models/get_model.py` 中注册
+3. 在 `configs/` 下创建配置
+4. 运行: `python main_fatigue.py --exp_name Your_Exp_Name`
 
-目录文件说明：
+### 自定义数据
 
-```
-数据集_年月日_时分秒毫秒_显卡配置
-```
-
-
-## 🛠️ 11. 扩展指南
-
-### ➕ 添加新模型
-1. 在 `models/` 下创建 `your_model.py`，定义 `YourModel(...)` 类。
-2. 在 `models/get_model.py` 中导入并注册：
-   ```python
-   elif model_name == "your_model":
-       return YourModel(num_classes=num_classes, ...)
-   ```
-3. 启动时指定 `--model_name your_model` 即可。
-
-### ➕ 自定义数据集
-1. 在 `data/dataset.py` 中继承 `torch.utils.data.Dataset`。
-2. 实现 `__len__` 和 `__getitem__` 方法。
-3. 在 `main.py` 中根据参数选择数据集类。
-
-### ➕ 修改训练流程
-- 所有训练逻辑封装在 `engine/trainer.py`。
-- 可自定义：
-  - 损失函数（修改 `loss_fn`）
-  - 评估指标（如 Top-1/Top-5 Acc）
-  - 日志频率、早停策略、学习率调度器等
+如果数据格式不同，修改 `data/fatigue_dataset.py` 中的：
+- `_load_data()`: 数据加载逻辑
+- `__getitem__()`: 返回格式
 
 ---
 
-## 📬 12. 贡献与反馈
+## 📚 参考文献
 
-欢迎提交 Issue 或 Pull Request！如果你觉得这个项目对你有帮助，请 ⭐ Star 支持！
+- **LSTM**: Hochreiter & Schmidhuber. *Long Short-term Memory*. Neural Computation, 1997.
+- **Transformer**: Vaswani et al. *Attention Is All You Need*. NeurIPS, 2017.
+- **Mamba**: Gu & Dao. *Mamba: Linear-Time Sequence Modeling with Selective State Spaces*. 2023.
+- **ProtoNet**: Snell et al. *Prototypical Networks for Few-shot Learning*. NeurIPS, 2017.
+- **RelationNet**: Sung et al. *Learning to Compare: Relation Network for Few-Shot Learning*. CVPR, 2018.
 
 ---
 
-> **Made with ❤️ and PyTorch** 
-> © 2025 Deep Learning Classification Project — MIT License
+## 📬 联系方式
+
+如有问题或建议，欢迎提交 Issue 或 Pull Request。
 
 ---
 
-✅ **现在就克隆项目，开启你的图像分类之旅吧！**
-
-<p align="center">
-  <img src="https://capsule-render.vercel.app/api?type=rect&color=9580FF&text=✨%20Enjoy%20Building%20Your%20Model!%20✨&fontColor=FFFFFF&fontSize=25&height=80"/>
-</p>
+> **Made with ❤️ for Fatigue Detection Research**
