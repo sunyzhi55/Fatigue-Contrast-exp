@@ -4,21 +4,72 @@
 
 数据格式说明：
 - 文件名格式: [id]_[easy|hard]_[alert|sleepy].jsonl
-- 每行为一帧数据，包含 deviation_px_after_calibrate 等特征
+- 每行为一帧数据，包含 deviation_px_before_calibrate / deviation_px_after_calibrate 等特征
 - alert=0, sleepy=1
+
+ADF 三通道特征（参考 features.py 的 compute_adf_features / sliding_mean）：
+- 通道 0  空间漂移 drift      : 原始 gaze-target 偏移距离（feature_name 字段）
+- 通道 1  一阶时序差分 diff   : np.diff(drift, prepend=drift[:1])
+- 通道 2  滑动窗口局部均值    : sliding_mean(drift, local_mean_size)
+三通道沿最后一维拼接，每个窗口形状 (window_size, 3)，供时序模型直接消费；
+小样本模型（MLP 编码器）在采样时展平为 (window_size*3,)。
 """
 import json
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 
+# ========================================================================== #
+#  ADF 特征计算（复刻 features.py 的 sliding_mean / compute_adf_features）     #
+# ========================================================================== #
+def sliding_mean(values: np.ndarray, window_size: int) -> np.ndarray:
+    """滑动窗口局部均值（向量化 cumsum 实现，边界处使用可用长度的均值）。
+
+    等价于 features.py 中的 sliding_mean：对每个位置 idx 取
+    values[max(0, idx-window_size+1) : idx+1] 的均值。
+    """
+    values = np.asarray(values, dtype=np.float32)
+    if values.ndim != 1:
+        raise ValueError("sliding_mean expects a 1-D array")
+    if window_size <= 1:
+        return values.copy()
+    n = len(values)
+    cumsum = np.cumsum(np.insert(values, 0, 0.0))
+    idx = np.arange(n)
+    starts = np.maximum(0, idx - window_size + 1)
+    counts = (idx - starts + 1).astype(np.float32)
+    out = (cumsum[1:] - cumsum[starts]) / counts
+    return out.astype(np.float32)
+
+
+def compute_adf(drift: np.ndarray, local_mean_size: int = 16) -> np.ndarray:
+    """由一维 drift 序列计算 ADF 三通道特征，返回 (T, 3) 的 float32 数组。
+
+    通道顺序: [drift, diff, local_mean]，与 features.py.compute_adf_features 一致。
+    """
+    drift = np.asarray(drift, dtype=np.float32)
+    if drift.size == 0:
+        return drift.reshape(0, 3)
+    diff = np.diff(drift, prepend=drift[:1]).astype(np.float32)
+    local_mean = sliding_mean(drift, local_mean_size)
+    return np.stack([drift, diff, local_mean], axis=-1).astype(np.float32)
+
+
+# ========================================================================== #
+#  时序数据集                                                                 #
+# ========================================================================== #
 class FatigueDataset(Dataset):
     """
     疲劳检测时序数据集
-    从JSONL文件加载 deviation 特征，构建滑动窗口。
+    从JSONL文件加载特征，构建滑动窗口。
     适用于 LSTM、Transformer、Mamba 等时序模型。
+
+    use_adf=True 时，每个窗口为 (window_size, 3) 的三通道张量
+    （空间漂移 / 一阶时序差分 / 滑动窗口局部均值）；
+    use_adf=False 时回退为 (window_size,) 的单通道序列。
     """
 
     def __init__(
@@ -26,26 +77,32 @@ class FatigueDataset(Dataset):
         data_dir: str,
         window_size: int = 30,
         stride: int = 15,
-        feature_name: str = "deviation_px_after_calibrate",
+        feature_name: str = "deviation_px_before_calibrate",
         subject_ids: Optional[List[str]] = None,
         difficulty: Optional[str] = None,
+        use_adf: bool = True,
+        local_mean_size: int = 16,
     ):
         """
         Args:
             data_dir: JSONL 文件目录
             window_size: 滑动窗口大小（帧数）
             stride: 滑动窗口步长
-            feature_name: 要提取的特征字段名
+            feature_name: 空间漂移使用的特征字段名
             subject_ids: 如果指定，仅加载这些受试者ID的数据
             difficulty: "easy" / "hard" / None(加载全部)
+            use_adf: 是否构造 ADF 三通道特征
+            local_mean_size: ADF 局部均值的窗口大小
         """
         super().__init__()
         self.data_dir = Path(data_dir)
         self.window_size = window_size
         self.stride = stride
         self.feature_name = feature_name
+        self.use_adf = use_adf
+        self.local_mean_size = local_mean_size
 
-        self.windows = []       # shape: (num_samples, window_size)
+        self.windows = []       # (window_size,) 或 (window_size, 3) 的 np.float32
         self.labels = []        # 0=alert, 1=sleepy
         self.subject_ids = []   # 受试者ID
         self.file_ids = []      # 文件ID
@@ -80,8 +137,8 @@ class FatigueDataset(Dataset):
 
             label = 0 if state == "alert" else 1
 
-            # 读取 JSONL 文件
-            deviation_values = []
+            # 读取 JSONL 文件，提取空间漂移序列
+            drift_values = []
             with open(file_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -90,16 +147,25 @@ class FatigueDataset(Dataset):
                     frame = json.loads(line)
                     value = frame.get(self.feature_name)
                     if value is not None:
-                        deviation_values.append(float(value))
+                        try:
+                            drift_values.append(float(value))
+                        except (TypeError, ValueError):
+                            continue
 
-            num_frames = len(deviation_values)
+            num_frames = len(drift_values)
             if num_frames < self.window_size:
                 continue  # 帧数不足，跳过
 
+            # 计算 ADF 三通道特征（在全序列上计算，保证局部均值/差分的时序上下文）
+            if self.use_adf:
+                sequence = compute_adf(drift_values, self.local_mean_size)  # (T, 3)
+            else:
+                sequence = np.asarray(drift_values, dtype=np.float32)       # (T,)
+
             # 构建滑动窗口
             for start in range(0, num_frames - self.window_size + 1, self.stride):
-                window = deviation_values[start:start + self.window_size]
-                self.windows.append(window)
+                window = sequence[start:start + self.window_size]
+                self.windows.append(np.ascontiguousarray(window, dtype=np.float32))
                 self.labels.append(label)
                 self.subject_ids.append(file_id)
                 self.file_ids.append(stem)
@@ -112,14 +178,16 @@ class FatigueDataset(Dataset):
                 f"（window_size={self.window_size}, stride={self.stride}）"
             )
         diff_str = difficulty if difficulty else "easy+hard"
+        chan_str = "ADF×3" if self.use_adf else "1ch"
         print(f"[FatigueDataset] 加载完成: {self.num_samples} 个窗口样本"
-              f" (难度={diff_str}, 来自 {len(set(self.file_ids))} 个文件)")
+              f" (难度={diff_str}, 通道={chan_str},"
+              f" 来自 {len(set(self.file_ids))} 个文件)")
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        window = torch.tensor(self.windows[idx], dtype=torch.float32)
+        window = torch.from_numpy(self.windows[idx].copy()).float()
         label = self.labels[idx]
         return {
             "window": window,
@@ -130,11 +198,17 @@ class FatigueDataset(Dataset):
         }
 
 
+# ========================================================================== #
+#  小样本数据集                                                               #
+# ========================================================================== #
 class FewShotFatigueDataset(Dataset):
     """
     小样本学习疲劳检测数据集
     按类别组织样本，支持 Episodic Sampling（N-way K-shot）。
     适用于 ProtoNet、RelationNet 等小样本学习模型。
+
+    use_adf=True 时，每个窗口为 (window_size, 3)；采样时展平为 (window_size*3,)
+    送入 MLP 编码器。use_adf=False 时窗口为 (window_size,)。
     """
 
     def __init__(
@@ -142,15 +216,19 @@ class FewShotFatigueDataset(Dataset):
         data_dir: str,
         window_size: int = 30,
         stride: int = 15,
-        feature_name: str = "deviation_px_after_calibrate",
+        feature_name: str = "deviation_px_before_calibrate",
         subject_ids: Optional[List[str]] = None,
         difficulty: Optional[str] = None,
+        use_adf: bool = True,
+        local_mean_size: int = 16,
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
         self.window_size = window_size
         self.stride = stride
         self.feature_name = feature_name
+        self.use_adf = use_adf
+        self.local_mean_size = local_mean_size
 
         # 按类别组织: {0: [(window, subject_id), ...], 1: [...]}
         self.class_to_samples: Dict[int, List[Dict]] = {0: [], 1: []}
@@ -159,8 +237,9 @@ class FewShotFatigueDataset(Dataset):
         self.num_classes = 2
         total = sum(len(v) for v in self.class_to_samples.values())
         diff_str = difficulty if difficulty else "easy+hard"
+        chan_str = "ADF×3" if self.use_adf else "1ch"
         print(f"[FewShotFatigueDataset] 加载完成: {total} 个窗口样本"
-              f" (难度={diff_str},"
+              f" (难度={diff_str}, 通道={chan_str},"
               f" alert={len(self.class_to_samples[0])},"
               f" sleepy={len(self.class_to_samples[1])})")
 
@@ -189,7 +268,7 @@ class FewShotFatigueDataset(Dataset):
 
             label = 0 if state == "alert" else 1
 
-            deviation_values = []
+            drift_values = []
             with open(file_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -198,14 +277,24 @@ class FewShotFatigueDataset(Dataset):
                     frame = json.loads(line)
                     value = frame.get(self.feature_name)
                     if value is not None:
-                        deviation_values.append(float(value))
+                        try:
+                            drift_values.append(float(value))
+                        except (TypeError, ValueError):
+                            continue
 
-            num_frames = len(deviation_values)
+            num_frames = len(drift_values)
             if num_frames < self.window_size:
                 continue
 
+            if self.use_adf:
+                sequence = compute_adf(drift_values, self.local_mean_size)  # (T, 3)
+            else:
+                sequence = np.asarray(drift_values, dtype=np.float32)       # (T,)
+
             for start in range(0, num_frames - self.window_size + 1, self.stride):
-                window = deviation_values[start:start + self.window_size]
+                window = np.ascontiguousarray(
+                    sequence[start:start + self.window_size], dtype=np.float32
+                )
                 self.class_to_samples[label].append({
                     "window": window,
                     "subject_id": file_id,
@@ -225,6 +314,15 @@ class FewShotFatigueDataset(Dataset):
     def get_class_samples_count(self):
         return {c: len(samples) for c, samples in self.class_to_samples.items()}
 
+    def _flatten_windows(self, items: List[Dict]) -> torch.Tensor:
+        """把若干窗口堆叠并展平为 (n, feature_dim) 的 float32 张量。
+
+        ADF 三通道 (n, W, 3) -> (n, W*3)；单通道 (n, W) -> (n, W)。
+        """
+        arr = np.stack([item["window"] for item in items], axis=0)  # (n, W) 或 (n, W, 3)
+        arr = arr.reshape(arr.shape[0], -1)
+        return torch.from_numpy(arr).float()
+
     def sample_episode(
         self,
         n_way: int = 2,
@@ -241,9 +339,9 @@ class FewShotFatigueDataset(Dataset):
 
         Returns:
             dict: {
-                'support_windows': tensor (n_way*k_shot, window_size),
+                'support_windows': tensor (n_way*k_shot, feature_dim),
                 'support_labels': tensor (n_way*k_shot,),
-                'query_windows': tensor (n_way*n_query, window_size),
+                'query_windows': tensor (n_way*n_query, feature_dim),
                 'query_labels': tensor (n_way*n_query,),
             }
         """
@@ -263,27 +361,25 @@ class FewShotFatigueDataset(Dataset):
 
         selected_classes = random.sample(available_classes, n_way)
 
-        support_windows = []
+        support_items = []
         support_labels = []
-        query_windows = []
+        query_items = []
         query_labels = []
 
         for new_label, cls in enumerate(selected_classes):
             samples = self.class_to_samples[cls]
             selected = random.sample(samples, min(k_shot + n_query, len(samples)))
 
-            for item in selected[:k_shot]:
-                support_windows.append(item["window"])
-                support_labels.append(new_label)
+            support_items.extend(selected[:k_shot])
+            support_labels.extend([new_label] * k_shot)
 
-            for item in selected[k_shot:k_shot + n_query]:
-                query_windows.append(item["window"])
-                query_labels.append(new_label)
+            query_items.extend(selected[k_shot:k_shot + n_query])
+            query_labels.extend([new_label] * n_query)
 
         return {
-            "support_windows": torch.tensor(support_windows, dtype=torch.float32),
+            "support_windows": self._flatten_windows(support_items),
             "support_labels": torch.tensor(support_labels, dtype=torch.long),
-            "query_windows": torch.tensor(query_windows, dtype=torch.float32),
+            "query_windows": self._flatten_windows(query_items),
             "query_labels": torch.tensor(query_labels, dtype=torch.long),
         }
 

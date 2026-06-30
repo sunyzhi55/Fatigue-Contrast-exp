@@ -79,10 +79,15 @@ def save_config_yaml(args, save_path: str):
 
 def build_model_with_kwargs(args, device):
     """构建模型，自动传递模型特有参数"""
-    # 时序模型: 输入是单个 deviation 值 (B, W) → 内部 unsqueeze 为 (B, W, 1)
-    # 小样本模型: 输入是整个窗口向量 (B, window_size)
+    # 时序模型: 输入 (B, W, C)，C=3(ADF三通道) 或 1(单通道)；模型内部按 input_size 投影
+    # 小样本模型: 输入 (B, W*C) 展平向量；input_size = window_size * C
     is_fewshot = args.model_name in ("protonet", "relationnet")
-    input_size = getattr(args, "window_size", 30) if is_fewshot else 1
+    use_adf = getattr(args, "use_adf", True)
+    num_channels = 3 if use_adf else 1
+    if is_fewshot:
+        input_size = getattr(args, "window_size", 30) * num_channels
+    else:
+        input_size = num_channels
 
     model_kwargs = {
         "input_size": input_size,
@@ -174,6 +179,8 @@ def build_fold_data(args, fold_config, mode="train"):
     """
     is_fewshot = "fewshot" in args.dataset_name.lower()
     difficulty = getattr(args, "difficulty", None)  # "easy" / "hard" / None
+    use_adf = getattr(args, "use_adf", True)
+    local_mean_size = getattr(args, "local_mean_size", 16)
 
     if mode == "test":
         subject_ids = getattr(args, "test_ids", None)
@@ -189,6 +196,7 @@ def build_fold_data(args, fold_config, mode="train"):
         else:
             subject_ids = None
 
+    adf_kwargs = dict(use_adf=use_adf, local_mean_size=local_mean_size)
     if is_fewshot:
         dataset = FewShotFatigueDataset(
             data_dir=args.data_dir,
@@ -197,6 +205,7 @@ def build_fold_data(args, fold_config, mode="train"):
             feature_name=args.feature_name,
             subject_ids=subject_ids,
             difficulty=difficulty,
+            **adf_kwargs,
         )
     else:
         dataset = FatigueDataset(
@@ -206,6 +215,7 @@ def build_fold_data(args, fold_config, mode="train"):
             feature_name=args.feature_name,
             subject_ids=subject_ids,
             difficulty=difficulty,
+            **adf_kwargs,
         )
 
     if mode == "train" and subject_ids is None and not is_fewshot:

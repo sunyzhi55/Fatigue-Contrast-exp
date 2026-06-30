@@ -38,6 +38,9 @@ fatigue_fewshot_experiments = {
         "feature_name": "deviation_px_before_calibrate",
         "window_size": 256,
         "stride": 64,
+        # ADF 三通道特征: 空间漂移 + 一阶时序差分 + 滑动窗口局部均值
+        "use_adf": True,
+        "local_mean_size": 16,
 
         # ---- 数据划分 ----
         "difficulty": "easy",  # 数据类别（easy / hard）
@@ -108,6 +111,9 @@ fatigue_fewshot_experiments = {
         "feature_name": "deviation_px_before_calibrate",
         "window_size": 256,
         "stride": 64,
+        # ADF 三通道特征: 空间漂移 + 一阶时序差分 + 滑动窗口局部均值
+        "use_adf": True,
+        "local_mean_size": 16,
 
         # ---- 数据划分 ----
         "difficulty": "easy",  # 数据类别（easy / hard）
