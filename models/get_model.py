@@ -86,6 +86,17 @@ def get_model(model_name, num_class, pretrained_path, device, **kwargs):
         )
         model = model.to(device)
 
+    # ======================== 域适应模型 ======================== #
+    elif model_name == 'mlda':
+        from models.mlda_model import MLDAModel
+        model = MLDAModel(
+            input_dim=kwargs.get('input_size', 768),
+            num_classes=num_class,
+            feat_dim=kwargs.get('feat_dim', 32),
+            dropout=kwargs.get('dropout', 0.05),
+        )
+        model = model.to(device)
+
     else:
         raise ValueError(f"Model name '{model_name}' is not recognized.")
 

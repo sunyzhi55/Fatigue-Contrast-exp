@@ -19,6 +19,7 @@ import sys
 import time
 import copy
 import argparse
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -27,6 +28,7 @@ from datetime import datetime
 
 from configs.fatigue_temporal_baselines import fatigue_temporal_experiments
 from configs.fatigue_fewshot_baselines import fatigue_fewshot_experiments
+from configs.fatigue_domain_adapt_baselines import fatigue_da_experiments
 from data.fatigue_dataset import (
     FatigueDataset, FewShotFatigueDataset,
     build_temporal_loader, build_fewshot_loader,
@@ -81,10 +83,12 @@ def build_model_with_kwargs(args, device):
     """构建模型，自动传递模型特有参数"""
     # 时序模型: 输入 (B, W, C)，C=3(ADF三通道) 或 1(单通道)；模型内部按 input_size 投影
     # 小样本模型: 输入 (B, W*C) 展平向量；input_size = window_size * C
+    # MLDA域适应模型: 输入 (B, W*C) 展平向量；input_size = window_size * C
     is_fewshot = args.model_name in ("protonet", "relationnet")
+    is_mlda = args.model_name == "mlda"
     use_adf = getattr(args, "use_adf", True)
     num_channels = 3 if use_adf else 1
-    if is_fewshot:
+    if is_fewshot or is_mlda:
         input_size = getattr(args, "window_size", 30) * num_channels
     else:
         input_size = num_channels
@@ -105,6 +109,7 @@ def build_model_with_kwargs(args, device):
         "expand": getattr(args, "expand", 2),
         "embedding_size": getattr(args, "embedding_size", 32),
         "relation_size": getattr(args, "relation_size", 16),
+        "feat_dim": getattr(args, "feat_dim", 32),
     }
     return get_model(
         args.model_name, args.num_classes,
@@ -533,6 +538,220 @@ def run_fewshot_fold(args, device, fold_idx, fold_config, recorder=None):
 
 
 # ========================================================================== #
+#  MLDA 域适应训练/验证（使用 RuntimeObserver）                               #
+# ========================================================================== #
+
+def run_mlda_fold(args, device, fold_idx, fold_config, recorder=None):
+    """训练一个 fold 的 MLDA 域适应模型
+
+    训练范式:
+        - 源域 = 训练集受试者（带标签）
+        - 目标域 = 验证集受试者（训练时标签不可见，使用伪标签做 ICD）
+        - 评估在目标域上进行
+
+    损失函数:
+        L = L_CE + 2 * [(1-λ)*L_inter + λ*L_intra]
+        - L_CE: 源域交叉熵
+        - L_inter: Wasserstein 域间分布对齐
+        - L_intra: ICD 类内/类间域差异对比损失
+        - λ: sigmoid 调度，从偏重域间逐渐过渡到偏重域内
+    """
+    from models.mlda_model import DomainProjection
+    from utils.mlda_loss import idcd_loss, compute_wasserstein_distance
+
+    print(f"\n{'='*60}")
+    print(f"🔥 Fold {fold_idx} / {args.k_fold} (MLDA 域适应)")
+    print(f"{'='*60}")
+
+    # ---- 构建源域 (train subjects) 和目标域 (val subjects) 数据集 ----
+    source_dataset = build_fold_data(args, fold_config, mode="train")
+    target_dataset = build_fold_data(args, fold_config, mode="val")
+
+    # MLDA 需要展平的向量输入: (B, window_size, C) -> (B, window_size * C)
+    src_windows = np.stack(source_dataset.windows, axis=0)  # (N, W, C) or (N, W)
+    src_flat = src_windows.reshape(src_windows.shape[0], -1).astype(np.float32)
+    src_labels = np.array(source_dataset.labels, dtype=np.int64)
+
+    tar_windows = np.stack(target_dataset.windows, axis=0)
+    tar_flat = tar_windows.reshape(tar_windows.shape[0], -1).astype(np.float32)
+    tar_labels = np.array(target_dataset.labels, dtype=np.int64)  # 仅用于评估，训练不可见
+
+    # 构建 TensorDataset + DataLoader
+    src_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(src_flat), torch.from_numpy(src_labels)
+    )
+    tar_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(tar_flat), torch.from_numpy(tar_labels)
+    )
+
+    batch_size = args.batch_size
+    src_loader = torch.utils.data.DataLoader(
+        src_dset, batch_size=batch_size, shuffle=True
+    )
+    tar_loader = torch.utils.data.DataLoader(
+        tar_dset, batch_size=batch_size, shuffle=True
+    )
+    # 评估用 loader（不 shuffle，不 drop_last）
+    eval_loader = torch.utils.data.DataLoader(
+        tar_dset, batch_size=batch_size, shuffle=False
+    )
+
+    print(f"源域 (训练): {len(src_dset)} 样本, 目标域 (验证): {len(tar_dset)} 样本")
+
+    # ---- 构建模型 ----
+    model = build_model_with_kwargs(args, device)
+    feat_dim = getattr(args, "feat_dim", 32)
+    proj_dropout = getattr(args, "dropout", 0.05)
+    u_net = DomainProjection(feat_dim, proj_dropout).to(device)
+    v_net = DomainProjection(feat_dim, proj_dropout).to(device)
+
+    # ---- 三个独立优化器（原论文设计） ----
+    lr = args.lr
+    wd = args.weight_decay
+    optimizer = get_optimizer(args.optimizer_name, model.parameters(), lr=lr, weight_decay=wd)
+    optimizer_u = get_optimizer(args.optimizer_name, u_net.parameters(), lr=lr, weight_decay=wd)
+    optimizer_v = get_optimizer(args.optimizer_name, v_net.parameters(), lr=lr, weight_decay=wd)
+
+    # 学习率调度
+    steps_per_epoch = min(len(src_loader), len(tar_loader))
+
+    def _make_onecycle(opt, steps):
+        try:
+            return torch.optim.lr_scheduler.OneCycleLR(
+                opt, max_lr=lr * 5, steps_per_epoch=steps,
+                epochs=args.epochs, anneal_strategy="cos", pct_start=0.1,
+            )
+        except Exception:
+            return None
+
+    scheduler = scheduler_u = scheduler_v = None
+    if args.lr_policy == "onecycle":
+        scheduler = _make_onecycle(optimizer, steps_per_epoch)
+        scheduler_u = _make_onecycle(optimizer_u, steps_per_epoch)
+        scheduler_v = _make_onecycle(optimizer_v, steps_per_epoch)
+
+    # ---- Observer ----
+    observer = create_observer(args, device, args.save_dir)
+
+    # ---- 损失函数 ----
+    criterion = nn.CrossEntropyLoss(
+        label_smoothing=getattr(args, "label_smoothing", 0.0)
+    ).to(device)
+
+    # MLDA 域适应参数
+    loss_weight = getattr(args, "mlda_loss_weight", 0.5)
+    lambda_center = getattr(args, "mlda_lambda_center", 100)
+
+    # ---- 训练循环 ----
+    for epoch in range(1, args.epochs + 1):
+        # === 训练阶段 ===
+        model.train()
+        u_net.train()
+        v_net.train()
+        observer.reset()
+
+        # sigmoid 调度: λ 从 ~1 (偏重域间) 衰减至 ~0 (偏重域内)
+        lam = 1.0 / (1.0 + np.exp(np.clip(epoch - lambda_center, -500, 500)))
+
+        for (src_batch, tar_batch) in zip(src_loader, tar_loader):
+            src_data = src_batch[0].to(device)
+            src_label = src_batch[1].to(device)
+            tar_data = tar_batch[0].to(device)
+
+            # 跳过 batch size 不匹配的情况
+            if src_data.size(0) != tar_data.size(0):
+                continue
+
+            # 前向传播 (源域 + 目标域)
+            src_feat, tar_feat, src_cls, tar_cls = model(src_data, tar_data)
+
+            # 1) 分类损失 (仅源域监督)
+            cls_loss = criterion(src_cls, src_label)
+
+            # 2) 域间损失: Wasserstein 距离 (梯度仅通过 U/V 投影)
+            src_proj = u_net(src_feat)
+            tar_proj = v_net(tar_feat)
+            inter_loss = compute_wasserstein_distance(src_proj, tar_proj)
+
+            # 3) 域内损失: ICD 对比损失 (目标域使用伪标签)
+            pseudo_labels = torch.argmax(tar_cls, dim=1)
+            intra_loss = idcd_loss(src_feat, tar_feat, src_label, pseudo_labels)
+
+            # 总损失: L_CE + 2 * [(1-λ)*L_inter + λ*L_intra]
+            da_loss = (1.0 - lam) * inter_loss + lam * intra_loss
+            total_loss = cls_loss + 2.0 * da_loss
+
+            # 反向传播 (三个优化器)
+            optimizer.zero_grad()
+            optimizer_u.zero_grad()
+            optimizer_v.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            optimizer_u.step()
+            optimizer_v.step()
+
+            # OneCycleLR 按 batch 步进
+            if scheduler is not None:
+                scheduler.step()
+            if scheduler_u is not None:
+                scheduler_u.step()
+            if scheduler_v is not None:
+                scheduler_v.step()
+
+            # 记录训练指标（使用源域分类结果）
+            prob = torch.softmax(src_cls, dim=1)
+            _, preds = torch.max(prob, dim=1)
+            observer.train_update(cls_loss, prob, preds, src_label)
+
+        # === 验证阶段 (在目标域上评估) ===
+        model.eval()
+        with torch.no_grad():
+            for batch_data, batch_label in eval_loader:
+                batch_data = batch_data.to(device)
+                batch_label = batch_label.to(device)
+
+                _, outputs = model(batch_data, None)  # 推理模式
+                loss = criterion(outputs, batch_label)
+
+                prob = torch.softmax(outputs, dim=1)
+                _, preds = torch.max(prob, dim=1)
+                observer.eval_update(loss, prob, preds, batch_label)
+
+        # === 计算指标、打印、早停、保存最佳模型 ===
+        should_stop = observer.execute(
+            epoch, args.epochs,
+            len(src_loader.dataset), len(eval_loader.dataset),
+            fold=fold_idx, model=model,
+        )
+
+        # 记录该轮 train + val 指标到 history.csv
+        if recorder is not None:
+            is_best = (observer.best_dicts.get("epoch", 0) == epoch)
+            recorder.record_epoch(observer, fold_idx, epoch, is_best=is_best)
+
+        # 非 OneCycleLR 的调度器在 epoch 级别步进
+        if scheduler is not None and not isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+            scheduler.step()
+        if scheduler_u is not None and not isinstance(scheduler_u, torch.optim.lr_scheduler.OneCycleLR):
+            scheduler_u.step()
+        if scheduler_v is not None and not isinstance(scheduler_v, torch.optim.lr_scheduler.OneCycleLR):
+            scheduler_v.step()
+
+        if should_stop:
+            print("⚠️  早停触发")
+            break
+
+    # ---- 记录该 fold 最佳结果 ----
+    observer.finish(fold_idx)
+    best_val_acc = float(observer.best_dicts["Accuracy"])
+    if recorder is not None:
+        recorder.record_best(observer, fold_idx)
+    print(f"Fold {fold_idx} 最佳验证: Acc={best_val_acc:.4f}")
+    return best_val_acc
+
+
+# ========================================================================== #
 #  批量测试评估（使用 RuntimeObserver）                                         #
 # ========================================================================== #
 
@@ -548,6 +767,7 @@ def batch_evaluate_folds(args, device, recorder=None):
     print(f"{'='*60}")
 
     is_fewshot = "fewshot" in args.dataset_name.lower()
+    is_mlda = args.model_name == "mlda"
     test_dataset = build_fold_data(args, {}, mode="test")
     print(f"测试集: {len(test_dataset)} 样本")
 
@@ -557,6 +777,17 @@ def batch_evaluate_folds(args, device, recorder=None):
         n_query = getattr(args, "n_query", 10)
         test_loader = build_fewshot_loader(
             test_dataset, n_way, k_shot, n_query, 50
+        )
+    elif is_mlda:
+        # MLDA 需要展平的向量输入
+        test_windows = np.stack(test_dataset.windows, axis=0)
+        test_flat = test_windows.reshape(test_windows.shape[0], -1).astype(np.float32)
+        test_labels = np.array(test_dataset.labels, dtype=np.int64)
+        test_dset = torch.utils.data.TensorDataset(
+            torch.from_numpy(test_flat), torch.from_numpy(test_labels)
+        )
+        test_loader = torch.utils.data.DataLoader(
+            test_dset, batch_size=args.batch_size, shuffle=False
         )
     else:
         test_loader = build_temporal_loader(test_dataset, args.batch_size, shuffle=False)
@@ -597,6 +828,19 @@ def batch_evaluate_folds(args, device, recorder=None):
         if is_fewshot:
             # 小样本：逐样本预测，使用 observer 记录完整指标
             _fewshot_eval_epoch(model, test_loader, device, observer, criterion_nll, mode="test")
+        elif is_mlda:
+            # MLDA：展平向量输入，推理模式 (tar_data=None)
+            with torch.no_grad():
+                for batch_data, batch_label in test_loader:
+                    batch_data = batch_data.to(device)
+                    batch_label = batch_label.to(device)
+
+                    _, outputs = model(batch_data, None)
+                    loss = criterion(outputs, batch_label)
+
+                    prob = torch.softmax(outputs, dim=1)
+                    _, predictions = torch.max(prob, dim=1)
+                    observer.test_update(loss, prob, predictions, batch_label)
         else:
             # 时序：标准前向推理，使用 observer 记录完整指标
             with torch.no_grad():
@@ -655,6 +899,7 @@ def main():
     all_experiments = {}
     all_experiments.update(fatigue_temporal_experiments)
     all_experiments.update(fatigue_fewshot_experiments)
+    all_experiments.update(fatigue_da_experiments)
 
     if args.exp_name not in all_experiments:
         print(f"❌ 实验 '{args.exp_name}' 未找到。可用实验:")
@@ -712,6 +957,7 @@ def main():
         print(f"验证策略: K-Fold, 共 {len(folds_config)} 折")
 
     is_fewshot = "fewshot" in args.dataset_name.lower()
+    is_da = getattr(args, "training_type", "") == "domain_adapt"
 
     # ---- 训练循环 ----
     start_time = time.time()
@@ -720,7 +966,9 @@ def main():
     for fold_idx in sorted(folds_config.keys()):
         fold_config = folds_config[fold_idx]
 
-        if is_fewshot:
+        if is_da:
+            best_val_acc = run_mlda_fold(args, device, fold_idx, fold_config, recorder=recorder)
+        elif is_fewshot:
             best_val_acc = run_fewshot_fold(args, device, fold_idx, fold_config, recorder=recorder)
         else:
             best_val_acc = run_temporal_fold(args, device, fold_idx, fold_config, recorder=recorder)
