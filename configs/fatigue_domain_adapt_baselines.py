@@ -96,4 +96,83 @@ fatigue_da_experiments = {
         "swanlab_description": "Fatigue Detection - MLDA Domain Adaptation Baseline",
         "swanlab_num_samples": 8,
     },
+
+    # ====================================================================== #
+    #                    DAEEGViT 域适应 Vision Transformer 基线              #
+    # ====================================================================== #
+    "Fatigue_DAEEGViT_baseline": {
+        # ---- 模型 ----
+        "model_name": "daeevit",
+        "num_classes": 2,
+        "checkpoint_path": None,
+
+        # DAEEGViT 特有参数
+        "embed_dim": 64,             # 嵌入维度 D
+        "depth": 4,                  # Transformer 层数
+        "num_heads": 4,              # 注意力头数
+        "patch_size": 32,            # Patch 大小 (256/32=8 patches)
+        "mlp_ratio": 4.0,            # MLP 隐藏层比率
+        "qkv_bias": True,            # QKV 偏置
+        "dropout": 0.1,              # Dropout 率
+        "attn_drop_ratio": 0.0,      # 注意力 Dropout 率
+        "drop_path_ratio": 0.1,      # Stochastic Depth 率
+        "mbconv_expand_ratio": 4,    # MBConv 扩展比率
+        "mbconv_se_ratio": 0.25,     # MBConv SE 比率
+        "representation_size": None, # 表示层维度 (None=不使用)
+
+        # ---- 数据 ----
+        "dataset_name": "FatigueDetection",
+        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+
+        # 特征与窗口
+        "feature_name": "deviation_px_before_calibrate",
+        "window_size": 256,
+        "stride": 64,
+        "use_adf": True,
+        "local_mean_size": 16,
+
+        # ---- 数据划分 ----
+        "difficulty": "easy",
+        "test_ids": None,
+        "folds": {
+            1: {"val_ids": ["01", "05", "14", "19"]},
+            2: {"val_ids": ["02", "06", "10", "15"]},
+            3: {"val_ids": ["07", "11", "16", "20"]},
+            4: {"val_ids": ["03", "08", "12", "17"]},
+            5: {"val_ids": ["04", "09", "13", "18"]},
+        },
+
+        # ---- 训练 ----
+        "training_type": "domain_adapt_vit",
+        "trainer_name": "TrainerForDAEEGViT",
+        "loss_fn_name": "CrossEntropyLoss",
+        "label_smoothing": 0.0,
+        "optimizer_name": "AdamW",
+
+        "batch_size": 64,
+        "epochs": 1000,
+        "patience": 1000,
+        "k_fold": 5,
+        "val_strategy": "kfold",
+
+        # ---- 超参数 ----
+        "lr": 1e-3,
+        "weight_decay": 1e-2,
+        "lr_policy": "onecycle",
+        "lr_decay": 0.95,
+        "niter": 50,
+
+        # ---- 域适应参数 ----
+        "mmd_weight": 1.0,           # MMD 损失权重 (论文 Eq.8: L = L_cls + L_mmd)
+
+        # ---- 系统 ----
+        "device": "cuda:0",
+        "seed": 42,
+        "output_dir": "./result",
+
+        # ---- SwanLab（可选） ----
+        "use_swanlab": False,
+        "swanlab_description": "Fatigue Detection - DAEEGViT Domain Adaptation Baseline",
+        "swanlab_num_samples": 8,
+    },
 }

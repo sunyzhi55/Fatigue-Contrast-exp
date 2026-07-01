@@ -110,6 +110,20 @@ def build_model_with_kwargs(args, device):
         "embedding_size": getattr(args, "embedding_size", 32),
         "relation_size": getattr(args, "relation_size", 16),
         "feat_dim": getattr(args, "feat_dim", 32),
+        # DAEEGViT 特有参数
+        "seq_len": getattr(args, "window_size", 256),
+        "in_channels": num_channels,
+        "patch_size": getattr(args, "patch_size", 32),
+        "embed_dim": getattr(args, "embed_dim", 64),
+        "depth": getattr(args, "depth", 4),
+        "num_heads": getattr(args, "num_heads", 4),
+        "mlp_ratio": getattr(args, "mlp_ratio", 4.0),
+        "qkv_bias": getattr(args, "qkv_bias", True),
+        "attn_drop_ratio": getattr(args, "attn_drop_ratio", 0.0),
+        "drop_path_ratio": getattr(args, "drop_path_ratio", 0.1),
+        "mbconv_expand_ratio": getattr(args, "mbconv_expand_ratio", 4),
+        "mbconv_se_ratio": getattr(args, "mbconv_se_ratio", 0.25),
+        "representation_size": getattr(args, "representation_size", None),
     }
     return get_model(
         args.model_name, args.num_classes,
@@ -752,6 +766,168 @@ def run_mlda_fold(args, device, fold_idx, fold_config, recorder=None):
 
 
 # ========================================================================== #
+#  DAEEGViT 域适应训练/验证（使用 RuntimeObserver）                           #
+# ========================================================================== #
+
+def run_daeevit_fold(args, device, fold_idx, fold_config, recorder=None):
+    """训练一个 fold 的 DAEEGViT 域适应模型
+
+    训练范式:
+        - 源域 = 训练集受试者（带标签，用于分类损失）
+        - 目标域 = 验证集受试者（无标签，仅特征参与 MMD 损失）
+        - 评估在目标域上进行
+
+    损失函数 (论文 Eq.8):
+        L = L_cls + L_mmd
+        - L_cls: 源域交叉熵 (对 logits)
+        - L_mmd: CLS token 特征上的 MMD (源域 vs 目标域)
+    """
+    from utils.mlda_loss import mmd_loss
+
+    print(f"\n{'='*60}")
+    print(f"🔥 Fold {fold_idx} / {args.k_fold} (DAEEGViT 域适应)")
+    print(f"{'='*60}")
+
+    # ---- 构建源域 (train) 和目标域 (val) 数据集 ----
+    source_dataset = build_fold_data(args, fold_config, mode="train")
+    target_dataset = build_fold_data(args, fold_config, mode="val")
+
+    # DAEEGViT 需要 (B, C, W) 格式: (B, window_size, channels) → (B, channels, window_size)
+    use_adf = getattr(args, "use_adf", True)
+    num_channels = 3 if use_adf else 1
+
+    src_windows = np.stack(source_dataset.windows, axis=0)  # (N, W, C)
+    src_bcw = src_windows.transpose(0, 2, 1).astype(np.float32)  # (N, C, W)
+    src_labels = np.array(source_dataset.labels, dtype=np.int64)
+
+    tar_windows = np.stack(target_dataset.windows, axis=0)
+    tar_bcw = tar_windows.transpose(0, 2, 1).astype(np.float32)  # (N, C, W)
+    tar_labels = np.array(target_dataset.labels, dtype=np.int64)
+
+    # 构建 TensorDataset + DataLoader
+    src_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(src_bcw), torch.from_numpy(src_labels)
+    )
+    tar_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(tar_bcw), torch.from_numpy(tar_labels)
+    )
+
+    batch_size = args.batch_size
+    src_loader = torch.utils.data.DataLoader(src_dset, batch_size=batch_size, shuffle=True)
+    tar_loader = torch.utils.data.DataLoader(tar_dset, batch_size=batch_size, shuffle=True)
+    eval_loader = torch.utils.data.DataLoader(tar_dset, batch_size=batch_size, shuffle=False)
+
+    print(f"源域 (训练): {len(src_dset)} 样本, 目标域 (验证): {len(tar_dset)} 样本")
+
+    # ---- 构建模型 ----
+    model = build_model_with_kwargs(args, device)
+    optimizer = get_optimizer(args.optimizer_name, model.parameters(),
+                              lr=args.lr, weight_decay=args.weight_decay)
+
+    # 学习率调度
+    steps_per_epoch = min(len(src_loader), len(tar_loader))
+    scheduler = None
+    if args.lr_policy == "onecycle":
+        try:
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer, max_lr=args.lr * 5, steps_per_epoch=steps_per_epoch,
+                epochs=args.epochs, anneal_strategy="cos", pct_start=0.1,
+            )
+        except Exception:
+            scheduler = None
+
+    # ---- Observer ----
+    observer = create_observer(args, device, args.save_dir)
+
+    # ---- 损失函数 ----
+    criterion = nn.CrossEntropyLoss(
+        label_smoothing=getattr(args, "label_smoothing", 0.0)
+    ).to(device)
+    mmd_weight = getattr(args, "mmd_weight", 1.0)
+
+    # ---- 训练循环 ----
+    for epoch in range(1, args.epochs + 1):
+        # === 训练阶段 ===
+        model.train()
+        observer.reset()
+
+        for (src_batch, tar_batch) in zip(src_loader, tar_loader):
+            src_data = src_batch[0].to(device)    # (B, C, W)
+            src_label = src_batch[1].to(device)
+            tar_data = tar_batch[0].to(device)    # (B, C, W)
+
+            if src_data.size(0) != tar_data.size(0):
+                continue
+
+            # 前向传播
+            src_logits, src_cls_feat = model(src_data)    # logits + CLS 特征
+            tar_logits, tar_cls_feat = model(tar_data)
+
+            # 1) 分类损失 (源域)
+            cls_loss = criterion(src_logits, src_label)
+
+            # 2) MMD 损失 (CLS token 特征对齐)
+            mmd = mmd_loss(src_cls_feat, tar_cls_feat)
+
+            # 总损失: L = L_cls + weight * L_mmd (论文 Eq.8)
+            total_loss = cls_loss + mmd_weight * mmd
+
+            # 反向传播
+            optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            if scheduler is not None and isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+                scheduler.step()
+
+            # 记录训练指标
+            prob = torch.softmax(src_logits, dim=1)
+            _, preds = torch.max(prob, dim=1)
+            observer.train_update(cls_loss, prob, preds, src_label)
+
+        # === 验证阶段 (目标域评估) ===
+        model.eval()
+        with torch.no_grad():
+            for batch_data, batch_label in eval_loader:
+                batch_data = batch_data.to(device)
+                batch_label = batch_label.to(device)
+
+                logits, _ = model(batch_data)
+                loss = criterion(logits, batch_label)
+
+                prob = torch.softmax(logits, dim=1)
+                _, preds = torch.max(prob, dim=1)
+                observer.eval_update(loss, prob, preds, batch_label)
+
+        # === 计算指标、打印、早停、保存最佳模型 ===
+        should_stop = observer.execute(
+            epoch, args.epochs,
+            len(src_loader.dataset), len(eval_loader.dataset),
+            fold=fold_idx, model=model,
+        )
+
+        if recorder is not None:
+            is_best = (observer.best_dicts.get("epoch", 0) == epoch)
+            recorder.record_epoch(observer, fold_idx, epoch, is_best=is_best)
+
+        if scheduler is not None and not isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+            scheduler.step()
+
+        if should_stop:
+            print("⚠️  早停触发")
+            break
+
+    # ---- 记录该 fold 最佳结果 ----
+    observer.finish(fold_idx)
+    best_val_acc = float(observer.best_dicts["Accuracy"])
+    if recorder is not None:
+        recorder.record_best(observer, fold_idx)
+    print(f"Fold {fold_idx} 最佳验证: Acc={best_val_acc:.4f}")
+    return best_val_acc
+
+
+# ========================================================================== #
 #  批量测试评估（使用 RuntimeObserver）                                         #
 # ========================================================================== #
 
@@ -768,6 +944,7 @@ def batch_evaluate_folds(args, device, recorder=None):
 
     is_fewshot = "fewshot" in args.dataset_name.lower()
     is_mlda = args.model_name == "mlda"
+    is_daeevit = args.model_name == "daeevit"
     test_dataset = build_fold_data(args, {}, mode="test")
     print(f"测试集: {len(test_dataset)} 样本")
 
@@ -785,6 +962,17 @@ def batch_evaluate_folds(args, device, recorder=None):
         test_labels = np.array(test_dataset.labels, dtype=np.int64)
         test_dset = torch.utils.data.TensorDataset(
             torch.from_numpy(test_flat), torch.from_numpy(test_labels)
+        )
+        test_loader = torch.utils.data.DataLoader(
+            test_dset, batch_size=args.batch_size, shuffle=False
+        )
+    elif is_daeevit:
+        # DAEEGViT 需要 (B, C, W) 格式
+        test_windows = np.stack(test_dataset.windows, axis=0)       # (N, W, C)
+        test_bcw = test_windows.transpose(0, 2, 1).astype(np.float32)  # (N, C, W)
+        test_labels = np.array(test_dataset.labels, dtype=np.int64)
+        test_dset = torch.utils.data.TensorDataset(
+            torch.from_numpy(test_bcw), torch.from_numpy(test_labels)
         )
         test_loader = torch.utils.data.DataLoader(
             test_dset, batch_size=args.batch_size, shuffle=False
@@ -836,6 +1024,19 @@ def batch_evaluate_folds(args, device, recorder=None):
                     batch_label = batch_label.to(device)
 
                     _, outputs = model(batch_data, None)
+                    loss = criterion(outputs, batch_label)
+
+                    prob = torch.softmax(outputs, dim=1)
+                    _, predictions = torch.max(prob, dim=1)
+                    observer.test_update(loss, prob, predictions, batch_label)
+        elif is_daeevit:
+            # DAEEGViT：(B, C, W) 输入，forward 返回 (logits, cls_features)
+            with torch.no_grad():
+                for batch_data, batch_label in test_loader:
+                    batch_data = batch_data.to(device)
+                    batch_label = batch_label.to(device)
+
+                    outputs, _ = model(batch_data)
                     loss = criterion(outputs, batch_label)
 
                     prob = torch.softmax(outputs, dim=1)
@@ -957,7 +1158,9 @@ def main():
         print(f"验证策略: K-Fold, 共 {len(folds_config)} 折")
 
     is_fewshot = "fewshot" in args.dataset_name.lower()
-    is_da = getattr(args, "training_type", "") == "domain_adapt"
+    training_type = getattr(args, "training_type", "")
+    is_da = training_type == "domain_adapt"
+    is_da_vit = training_type == "domain_adapt_vit"
 
     # ---- 训练循环 ----
     start_time = time.time()
@@ -968,6 +1171,8 @@ def main():
 
         if is_da:
             best_val_acc = run_mlda_fold(args, device, fold_idx, fold_config, recorder=recorder)
+        elif is_da_vit:
+            best_val_acc = run_daeevit_fold(args, device, fold_idx, fold_config, recorder=recorder)
         elif is_fewshot:
             best_val_acc = run_fewshot_fold(args, device, fold_idx, fold_config, recorder=recorder)
         else:

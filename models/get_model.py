@@ -97,6 +97,27 @@ def get_model(model_name, num_class, pretrained_path, device, **kwargs):
         )
         model = model.to(device)
 
+    elif model_name == 'daeevit':
+        from models.daeevit_model import DAEEGViTModel
+        model = DAEEGViTModel(
+            seq_len=kwargs.get('seq_len', 256),
+            patch_size=kwargs.get('patch_size', 32),
+            in_channels=kwargs.get('in_channels', 3),
+            num_classes=num_class,
+            embed_dim=kwargs.get('embed_dim', 64),
+            depth=kwargs.get('depth', 4),
+            num_heads=kwargs.get('num_heads', 4),
+            mlp_ratio=kwargs.get('mlp_ratio', 4.0),
+            qkv_bias=kwargs.get('qkv_bias', True),
+            drop_ratio=kwargs.get('dropout', 0.1),
+            attn_drop_ratio=kwargs.get('attn_drop_ratio', 0.0),
+            drop_path_ratio=kwargs.get('drop_path_ratio', 0.1),
+            mbconv_expand_ratio=kwargs.get('mbconv_expand_ratio', 4),
+            mbconv_se_ratio=kwargs.get('mbconv_se_ratio', 0.25),
+            representation_size=kwargs.get('representation_size', None),
+        )
+        model = model.to(device)
+
     else:
         raise ValueError(f"Model name '{model_name}' is not recognized.")
 

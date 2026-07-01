@@ -27,6 +27,7 @@
 | **小样本学习** | ProtoNet | 原型网络，基于欧氏距离的度量学习 |
 | | RelationNet | 关系网络，基于可学习关系模块的度量学习 |
 | **域适应** | MLDA | 多级域适应，Wasserstein 域间对齐 + ICD 类条件对比 |
+| | DAEEGViT | 域适应 ViT + MBConv，CLS token MMD 对齐 |
 
 ---
 
@@ -51,6 +52,7 @@ Fatigue-Contrast-exp/
 │   ├── protonet.py                       # Prototypical Networks
 │   ├── relationnet.py                    # Relation Network
 │   ├── mlda_model.py                     # MLDA 域适应模型 (Encoder+Classifier+U/V)
+│   ├── daeevit_model.py                  # DAEEGViT 域适应 ViT+MBConv 模型
 │   └── ...                               # 原始模板模型 (ResNet/EfficientNet 等)
 ├── utils/
 │   ├── basic.py                          # 优化器/学习率调度器
@@ -65,6 +67,9 @@ Fatigue-Contrast-exp/
 │   ├── network.py                        # 原始网络定义
 │   ├── idcd.py                           # 原始 ICD 损失
 │   └── load_data2.py                     # 原始 .mat 数据加载
+├── DAEEGViT/                             # DAEEGViT 原始参考实现 (EEG, 独立运行)
+│   ├── DAEEGViT.py                       # 原始模型代码
+│   └── *.pdf                             # 论文 PDF
 ├── main_fatigue.py                       # 疲劳检测训练入口 ⭐
 ├── main.py                               # 原始模板训练入口
 ├── requirements.txt                      # 依赖清单
@@ -201,6 +206,7 @@ python main_fatigue.py --exp_name Fatigue_RelationNet_baseline
 
 # ---- 域适应基线 ----
 python main_fatigue.py --exp_name Fatigue_MLDA_baseline
+python main_fatigue.py --exp_name Fatigue_DAEEGViT_baseline
 ```
 
 ### 3️⃣ 输出
@@ -290,6 +296,21 @@ result_20260630_143000_Fatigue_LSTM_baseline/
 | `mlda_loss_weight` | 域间/域内损失平衡权重 λ | 0.5 |
 | `mlda_lambda_center` | sigmoid 调度中心 epoch | 100 |
 | `label_smoothing` | 标签平滑 (建议关闭) | 0.0 |
+
+### 域适应基线特有参数 (DAEEGViT)
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---:|
+| `embed_dim` | ViT 嵌入维度 D | 64 |
+| `depth` | Transformer 层数 | 4 |
+| `num_heads` | 注意力头数 | 4 |
+| `patch_size` | Patch 大小 (需整除 window_size) | 32 |
+| `mlp_ratio` | MLP 隐藏层比率 | 4.0 |
+| `dropout` | Dropout 率 | 0.1 |
+| `drop_path_ratio` | Stochastic Depth 率 | 0.1 |
+| `mbconv_expand_ratio` | MBConv 扩展比率 | 4 |
+| `mbconv_se_ratio` | MBConv SE 比率 | 0.25 |
+| `mmd_weight` | MMD 损失权重 | 1.0 |
 
 ### 验证策略
 
@@ -404,6 +425,46 @@ L = L_CE + 2 × [(1 - λ) × L_inter + λ × L_intra]
 - 源域+目标域 batch 配对训练 (`zip(src_loader, tar_loader)`)
 - 目标域标签在训练时不可见，使用伪标签参与 ICD 损失计算
 
+### DAEEGViT (Domain Adaptive EEG Vision Transformer)
+
+DAEEGViT 是 1D Vision Transformer 结合 MBConv 的域适应方法，在 CLS token 特征上使用 MMD 进行跨域对齐。
+
+```
+Input (B, C, W) → Conv1d PatchEmbed → [CLS] + Patches + PosEmbed
+                 ↓
+            ┌─ Block × depth ─────────────────────────────┐
+            │  Attention (全局特征) → residual             │
+            │  MBConv  (局部特征, token 维度卷积) → residual │
+            │  MLP     (特征变换) → residual               │
+            └──────────────────────────────────────────────┘
+                 ↓
+            CLS token → Classifier → logits
+                      → MMD(source_cls, target_cls)
+```
+
+**Block** (三子模块，区别于标准 ViT 的两子模块):
+```
+x → LN → MultiHeadAttention → residual → MBConv → residual → LN → MLP → residual
+```
+
+MBConv 在 token 序列维度 (N+1) 上做 1D 卷积，捕获局部模式:
+```
+expand(1x1) → DW_Conv(3x3) → SqueezeExcite → project(1x1) + residual
+```
+
+**损失函数**:
+```
+L = L_cls + L_mmd
+
+- L_cls: 源域交叉熵 (对 logits)
+- L_mmd: CLS token 特征上的 MK-MMD (多核高斯核)
+```
+
+**训练特点**:
+- 单模型 + 单优化器 (比 MLDA 更简洁)
+- 源域+目标域 batch 配对训练 (`zip(src_loader, tar_loader)`)
+- MMD 无额外调度参数，直接等权加到分类损失上
+
 ---
 
 ## 📋 模型参数量
@@ -416,6 +477,7 @@ L = L_CE + 2 × [(1 - λ) × L_inter + λ × L_intra]
 | ProtoNet | ~8.5K | hidden=64, emb=32 |
 | RelationNet | ~9.9K | hidden=64, emb=32, relation=16 |
 | MLDA | ~482K + 2.2K (U/V) | Encoder 481K, U 1.1K, V 1.1K |
+| DAEEGViT | ~212K | embed=64, depth=4, heads=4, patch=32 |
 
 ---
 
@@ -438,6 +500,7 @@ L = L_CE + 2 × [(1 - λ) × L_inter + λ × L_intra]
 | _(默认)_ | `run_temporal_fold()` | LSTM, Transformer, Mamba |
 | _(fewshot)_ | `run_fewshot_fold()` | ProtoNet, RelationNet |
 | `domain_adapt` | `run_mlda_fold()` | MLDA |
+| `domain_adapt_vit` | `run_daeevit_fold()` | DAEEGViT |
 
 如需添加新的域适应方法，参考 `run_mlda_fold()` 的双流数据 + 域适应损失模式。
 
@@ -457,6 +520,7 @@ L = L_CE + 2 × [(1 - λ) × L_inter + λ × L_intra]
 - **ProtoNet**: Snell et al. *Prototypical Networks for Few-shot Learning*. NeurIPS, 2017.
 - **RelationNet**: Sung et al. *Learning to Compare: Relation Network for Few-Shot Learning*. CVPR, 2018.
 - **MLDA**: Huang et al. *Multi-level domain adaptation for improved generalization in electroencephalogram-based driver fatigue detection*. Engineering Applications of Artificial Intelligence, 2025.
+- **DAEEGViT**: *DAEEGViT: A domain adaptive vision transformer framework for EEG cognitive state identification*.
 
 ---
 

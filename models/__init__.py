@@ -13,3 +13,4 @@ from models.mamba_model import *
 from models.protonet import *
 from models.relationnet import *
 from models.mlda_model import *
+from models.daeevit_model import *

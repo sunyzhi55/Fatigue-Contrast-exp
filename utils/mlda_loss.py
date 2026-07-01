@@ -164,3 +164,55 @@ def compute_wasserstein_distance(src_projected, tar_projected):
         src_sorted, _ = torch.sort(src_projected, dim=0)
         tar_sorted, _ = torch.sort(tar_projected, dim=0)
         return torch.abs(src_sorted - tar_sorted).mean().item()
+
+
+# ========================================================================== #
+#  MMD 损失 (用于 DAEEGViT CLS token 域适应)                                  #
+# ========================================================================== #
+
+def mmd_loss(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
+    """Maximum Mean Discrepancy (MMD) 损失
+
+    使用多核高斯核 (MK-MMD) 度量源域和目标域特征分布差异。
+    用于 DAEEGViT 在 CLS token 特征上的域适应。
+
+    L_mmd = MMD²(P_s, P_t) = E[k(s,s')] + E[k(t,t')] - 2*E[k(s,t)]
+
+    Args:
+        source: (n, d) 源域 CLS 特征
+        target: (m, d) 目标域 CLS 特征
+        kernel_mul: 核带宽乘数因子
+        kernel_num: 核数量
+        fix_sigma: 固定带宽 (None 使用均值启发式)
+
+    Returns:
+        标量损失 (可微)
+    """
+    n = source.size(0)
+    m = target.size(0)
+    total = torch.cat([source, target], dim=0)
+
+    # 成对 L2 距离矩阵
+    total0 = total.unsqueeze(0).expand(total.size(0), total.size(0), total.size(1))
+    total1 = total.unsqueeze(1).expand(total.size(0), total.size(0), total.size(1))
+    L2_distance = ((total0 - total1) ** 2).sum(2)
+
+    # 带宽: 均值启发式
+    if fix_sigma is not None:
+        bandwidth = fix_sigma
+    else:
+        n_samples = total.size(0)
+        bandwidth = torch.sum(L2_distance.data) / (n_samples ** 2 - n_samples)
+
+    # 多尺度高斯核
+    bandwidth = bandwidth / (kernel_mul ** (kernel_num // 2))
+    bandwidth_list = [bandwidth * (kernel_mul ** i) for i in range(kernel_num)]
+    kernels = sum([torch.exp(-L2_distance / bw) for bw in bandwidth_list])
+
+    # MMD² = E[k(s,s)] + E[k(t,t)] - 2*E[k(s,t)]
+    XX = kernels[:n, :n].sum() / (n * n)
+    YY = kernels[n:, n:].sum() / (m * m)
+    XY = kernels[:n, n:].sum() / (n * m)
+    YX = kernels[n:, :n].sum() / (m * n)
+
+    return XX + YY - XY - YX
