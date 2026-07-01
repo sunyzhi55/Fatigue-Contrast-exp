@@ -14,3 +14,4 @@ from models.protonet import *
 from models.relationnet import *
 from models.mlda_model import *
 from models.daeevit_model import *
+from models.lamsda_model import *

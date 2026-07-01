@@ -216,3 +216,140 @@ def mmd_loss(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
     YX = kernels[n:, :n].sum() / (m * n)
 
     return XX + YY - XY - YX
+
+
+# ========================================================================== #
+#  LLMMD 损失 (用于 LA-MSDA 标签条件域适应)                                    #
+# ========================================================================== #
+
+def _label_aware_weights(source_label, target_probs, num_classes):
+    """计算标签感知的局部权重矩阵
+
+    源域: 真实标签 → one-hot → 按类别计数归一化 (硬标签)
+    目标域: softmax 概率 → 按类别求和归一化 (软标签)
+
+    Args:
+        source_label: (n,) 源域真实标签 (long)
+        target_probs: (m, num_classes) 目标域 softmax 概率
+        num_classes: 类别数
+
+    Returns:
+        ss_weight: (n, n) 源-源权重
+        tt_weight: (m, m) 目标-目标权重
+        st_weight: (n, m) 源-目标权重
+    """
+    n = source_label.size(0)
+    m = target_probs.size(0)
+    device = source_label.device
+
+    # 源域: one-hot → 按类计数归一化
+    s_vec = torch.zeros(n, num_classes, device=device)
+    for c in range(num_classes):
+        mask = (source_label == c)
+        cnt = mask.float().sum().clamp(min=1)
+        s_vec[mask, c] = 1.0 / cnt
+
+    # 目标域: softmax 概率 → 按类求和归一化
+    t_vec = target_probs.clone()
+    for c in range(num_classes):
+        col_sum = t_vec[:, c].sum().clamp(min=1e-6)
+        t_vec[:, c] = t_vec[:, c] / col_sum
+
+    # 计算每个类别的权重矩阵并累加
+    ss_weight = torch.zeros(n, n, device=device)
+    tt_weight = torch.zeros(m, m, device=device)
+    st_weight = torch.zeros(n, m, device=device)
+
+    for c in range(num_classes):
+        sv = s_vec[:, c]
+        tv = t_vec[:, c]
+        ss_weight += torch.outer(sv, sv)
+        tt_weight += torch.outer(tv, tv)
+        st_weight += torch.outer(sv, tv)
+
+    return ss_weight, tt_weight, st_weight
+
+
+def llmmd_loss(source_feat, target_feat, source_label, target_probs,
+               num_classes=2, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
+    """标签条件局部 MMD (Label-based Local MMD)
+
+    与标准 MMD 的区别: 核矩阵的每个元素按类别归属加权，
+    仅对同类别跨域样本对施加强对齐，防止负迁移。
+
+    Args:
+        source_feat: (n, d) 源域共享特征
+        target_feat: (m, d) 目标域共享特征
+        source_label: (n,) 源域真实标签
+        target_probs: (m, num_classes) 目标域 softmax 概率
+        num_classes: 类别数
+        kernel_mul, kernel_num, fix_sigma: 核参数
+
+    Returns:
+        标量损失 (可微)
+    """
+    n = source_feat.size(0)
+    total = torch.cat([source_feat, target_feat], dim=0)
+
+    # 成对 L2 距离 + 多核高斯核
+    total0 = total.unsqueeze(0).expand(total.size(0), total.size(0), total.size(1))
+    total1 = total.unsqueeze(1).expand(total.size(0), total.size(0), total.size(1))
+    L2_distance = ((total0 - total1) ** 2).sum(2)
+
+    if fix_sigma is not None:
+        bandwidth = fix_sigma
+    else:
+        n_samples = total.size(0)
+        bandwidth = torch.sum(L2_distance.data) / (n_samples ** 2 - n_samples)
+
+    bandwidth = bandwidth / (kernel_mul ** (kernel_num // 2))
+    bandwidth_list = [bandwidth * (kernel_mul ** i) for i in range(kernel_num)]
+    kernels = sum([torch.exp(-L2_distance / bw) for bw in bandwidth_list])
+
+    # 分块核矩阵
+    SS = kernels[:n, :n]
+    TT = kernels[n:, n:]
+    ST = kernels[:n, n:]
+
+    # 标签感知权重
+    ss_w, tt_w, st_w = _label_aware_weights(source_label, target_probs, num_classes)
+
+    # 加权 MMD
+    loss = (ss_w * SS).sum() + (tt_w * TT).sum() - 2.0 * (st_w * ST).sum()
+    return loss
+
+
+# ========================================================================== #
+#  全局共识损失 (用于 LA-MSDA 多源分类器一致性)                                 #
+# ========================================================================== #
+
+def global_consensus_loss(target_probs_list):
+    """多源分类器共识损失
+
+    鼓励所有源域分类器在目标域上的预测趋于一致。
+    使用排序加权策略: 最大分歧配最小权重，防止单个异常主导。
+
+    Args:
+        target_probs_list: list of (B, num_classes), 每个源域分支的 softmax 概率
+
+    Returns:
+        标量损失
+    """
+    num_sources = len(target_probs_list)
+    if num_sources < 2:
+        return torch.tensor(0.0, device=target_probs_list[0].device)
+
+    # 计算每对分类器之间的 L1 分歧
+    disagreements = []
+    for i in range(num_sources):
+        for j in range(i + 1, num_sources):
+            diff = torch.mean(torch.abs(target_probs_list[i] - target_probs_list[j]))
+            disagreements.append(diff)
+
+    # 排序加权: 最大分歧 → 最小权重
+    disps = torch.stack(disagreements)
+    sorted_vals, sorted_idx = torch.sort(disps, descending=True)
+    weights = torch.linspace(1.0, 0.1, steps=len(disps), device=disps.device)
+    weights = weights / weights.sum()
+
+    return (weights * sorted_vals).sum()

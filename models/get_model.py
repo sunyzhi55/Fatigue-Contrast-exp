@@ -118,6 +118,18 @@ def get_model(model_name, num_class, pretrained_path, device, **kwargs):
         )
         model = model.to(device)
 
+    elif model_name == 'lamsda':
+        from models.lamsda_model import LAMSDAModel
+        model = LAMSDAModel(
+            in_channels=kwargs.get('in_channels', 3),
+            seq_len=kwargs.get('seq_len', 256),
+            num_classes=num_class,
+            num_sources=kwargs.get('num_sources', 5),
+            feature_dim=kwargs.get('feature_dim', 64),
+            ds_hidden_dim=kwargs.get('ds_hidden_dim', 256),
+        )
+        model = model.to(device)
+
     else:
         raise ValueError(f"Model name '{model_name}' is not recognized.")
 

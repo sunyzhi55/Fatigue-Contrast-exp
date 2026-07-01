@@ -124,6 +124,8 @@ def build_model_with_kwargs(args, device):
         "mbconv_expand_ratio": getattr(args, "mbconv_expand_ratio", 4),
         "mbconv_se_ratio": getattr(args, "mbconv_se_ratio", 0.25),
         "representation_size": getattr(args, "representation_size", None),
+        # LA-MSDA 特有参数
+        "num_sources": getattr(args, "num_sources", 5),
     }
     return get_model(
         args.model_name, args.num_classes,
@@ -928,6 +930,219 @@ def run_daeevit_fold(args, device, fold_idx, fold_config, recorder=None):
 
 
 # ========================================================================== #
+#  LA-MSDA 多源域适应训练/验证（使用 RuntimeObserver）                        #
+# ========================================================================== #
+
+def run_lamsda_fold(args, device, fold_idx, fold_config, recorder=None):
+    """训练一个 fold 的 LA-MSDA 多源域适应模型
+
+    训练范式:
+        - 每个训练受试者 = 一个源域 (带标签)
+        - 验证受试者 = 目标域 (训练时标签不可见)
+        - 每个源域有独立的 DSCNN + 分类器分支
+        - 推理时集成所有分支的 softmax 平均
+
+    损失函数:
+        L = L_cls + μ·L_llmmd + γ·L_global
+        - L_cls: 当前源域分支的交叉熵
+        - L_llmmd: 标签条件 MMD (共享特征上)
+        - L_global: 所有分支在目标域上的共识损失
+        - μ, γ: sigmoid 预热 (从 0 渐增到 1)
+    """
+    from utils.mlda_loss import llmmd_loss, global_consensus_loss
+
+    print(f"\n{'='*60}")
+    print(f"🔥 Fold {fold_idx} / {args.k_fold} (LA-MSDA 多源域适应)")
+    print(f"{'='*60}")
+
+    # ---- 构建源域 (按受试者分组) 和目标域 ----
+    source_dataset = build_fold_data(args, fold_config, mode="train")
+    target_dataset = build_fold_data(args, fold_config, mode="val")
+
+    use_adf = getattr(args, "use_adf", True)
+    num_channels = 3 if use_adf else 1
+
+    # 按受试者分组源域数据
+    subject_to_indices = {}
+    for i, sid in enumerate(source_dataset.subject_ids):
+        subject_to_indices.setdefault(sid, []).append(i)
+
+    # 构建每个源域的数据 → (B, C, W) 格式
+    source_loaders = []
+    subject_ids_list = sorted(subject_to_indices.keys())
+    for sid in subject_ids_list:
+        indices = subject_to_indices[sid]
+        windows = np.stack([source_dataset.windows[i] for i in indices], axis=0)
+        bcw = windows.transpose(0, 2, 1).astype(np.float32)  # (N, C, W)
+        labels = np.array([source_dataset.labels[i] for i in indices], dtype=np.int64)
+        dset = torch.utils.data.TensorDataset(
+            torch.from_numpy(bcw), torch.from_numpy(labels)
+        )
+        loader = torch.utils.data.DataLoader(
+            dset, batch_size=args.batch_size, shuffle=True, drop_last=True
+        )
+        source_loaders.append(loader)
+
+    # 目标域数据
+    tar_windows = np.stack(target_dataset.windows, axis=0)
+    tar_bcw = tar_windows.transpose(0, 2, 1).astype(np.float32)
+    tar_labels = np.array(target_dataset.labels, dtype=np.int64)
+    tar_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(tar_bcw), torch.from_numpy(tar_labels)
+    )
+    tar_loader = torch.utils.data.DataLoader(
+        tar_dset, batch_size=args.batch_size, shuffle=True, drop_last=True
+    )
+    eval_loader = torch.utils.data.DataLoader(
+        tar_dset, batch_size=args.batch_size, shuffle=False
+    )
+
+    # 源域数量受配置上限控制
+    num_sources = min(len(source_loaders), getattr(args, "num_sources", 5))
+    source_loaders = source_loaders[:num_sources]
+
+    print(f"源域: {num_sources} 个受试者分支, 目标域: {len(tar_dset)} 样本")
+
+    # ---- 构建模型 ----
+    # 覆盖 num_sources 参数
+    args._lamsda_num_sources = num_sources
+    orig_num_sources = getattr(args, "num_sources", 5)
+    args.num_sources = num_sources
+    model = build_model_with_kwargs(args, device)
+    args.num_sources = orig_num_sources
+
+    optimizer = get_optimizer(args.optimizer_name, model.parameters(),
+                              lr=args.lr, weight_decay=args.weight_decay)
+    criterion = nn.CrossEntropyLoss().to(device)
+
+    # ---- Observer ----
+    observer = create_observer(args, device, args.save_dir)
+
+    # sigmoid 预热参数
+    max_epoch = args.epochs
+    warmup_scale = getattr(args, "da_warmup_scale", 10.0)
+
+    # ---- 训练循环 ----
+    total_iterations = 0
+    for epoch in range(1, max_epoch + 1):
+        model.train()
+        observer.reset()
+
+        # sigmoid 调度: 从 0 渐增到 1
+        progress = epoch / max_epoch
+        gamma = 2.0 / (1.0 + np.exp(-warmup_scale * progress)) - 1.0
+        mu = gamma
+
+        # 为每个源域创建无限迭代器
+        src_iters = [iter(loader) for loader in source_loaders]
+
+        # 目标域迭代器 (循环使用)
+        tar_iter = iter(tar_loader)
+
+        for mark in range(num_sources):
+            # 获取源域 batch (自动循环)
+            try:
+                src_data, src_label = next(src_iters[mark])
+            except StopIteration:
+                src_iters[mark] = iter(source_loaders[mark])
+                src_data, src_label = next(src_iters[mark])
+
+            # 获取目标域 batch
+            try:
+                tar_data, _ = next(tar_iter)
+            except StopIteration:
+                tar_iter = iter(tar_loader)
+                tar_data, _ = next(tar_iter)
+
+            src_data = src_data.to(device)
+            src_label = src_label.to(device)
+            tar_data = tar_data.to(device)
+
+            # 前向传播: 当前源域分支
+            src_logits, src_feat = model(src_data, mark)
+
+            # 1) 分类损失 (当前源域分支)
+            cls_loss = criterion(src_logits, src_label)
+
+            # 2) LLMMD 损失 (共享特征上)
+            with torch.no_grad():
+                src_shared = model.shared_features(src_data)
+                tar_shared = model.shared_features(tar_data)
+                tar_logits_mark, _ = model(tar_data, mark)
+                tar_probs = F.softmax(tar_logits_mark, dim=1)
+
+            llmmd = llmmd_loss(src_shared, tar_shared, src_label, tar_probs,
+                               num_classes=args.num_classes)
+
+            # 3) 全局共识损失 (所有分支在目标域上的预测一致性)
+            if num_sources > 1:
+                target_probs_list = []
+                for k in range(num_sources):
+                    with torch.no_grad():
+                        t_logits, _ = model(tar_data, k)
+                    target_probs_list.append(F.softmax(t_logits, dim=1))
+                # 让当前分支有梯度
+                t_logits_mark, _ = model(tar_data, mark)
+                target_probs_list[mark] = F.softmax(t_logits_mark, dim=1)
+                glo_loss = global_consensus_loss(target_probs_list)
+            else:
+                glo_loss = torch.tensor(0.0, device=device)
+
+            # 总损失
+            total_loss = cls_loss + mu * llmmd + gamma * glo_loss
+
+            # 反向传播
+            optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            total_iterations += 1
+
+            # 记录训练指标 (当前源域分支)
+            prob = torch.softmax(src_logits, dim=1)
+            _, preds = torch.max(prob, dim=1)
+            observer.train_update(cls_loss, prob, preds, src_label)
+
+        # === 验证阶段 (集成所有分支) ===
+        model.eval()
+        with torch.no_grad():
+            for batch_data, batch_label in eval_loader:
+                batch_data = batch_data.to(device)
+                batch_label = batch_label.to(device)
+
+                avg_probs = model.ensemble_predict(batch_data)
+                _, preds = torch.max(avg_probs, dim=1)
+
+                # 使用 CE loss 作为 observer 记录值
+                loss = criterion(torch.log(avg_probs + 1e-8), batch_label)
+                observer.eval_update(loss, avg_probs, preds, batch_label)
+
+        # === 计算指标、打印、早停、保存最佳模型 ===
+        should_stop = observer.execute(
+            epoch, max_epoch,
+            sum(len(l.dataset) for l in source_loaders),
+            len(eval_loader.dataset),
+            fold=fold_idx, model=model,
+        )
+
+        if recorder is not None:
+            is_best = (observer.best_dicts.get("epoch", 0) == epoch)
+            recorder.record_epoch(observer, fold_idx, epoch, is_best=is_best)
+
+        if should_stop:
+            print("⚠️  早停触发")
+            break
+
+    # ---- 记录该 fold 最佳结果 ----
+    observer.finish(fold_idx)
+    best_val_acc = float(observer.best_dicts["Accuracy"])
+    if recorder is not None:
+        recorder.record_best(observer, fold_idx)
+    print(f"Fold {fold_idx} 最佳验证: Acc={best_val_acc:.4f}")
+    return best_val_acc
+
+
+# ========================================================================== #
 #  批量测试评估（使用 RuntimeObserver）                                         #
 # ========================================================================== #
 
@@ -945,6 +1160,7 @@ def batch_evaluate_folds(args, device, recorder=None):
     is_fewshot = "fewshot" in args.dataset_name.lower()
     is_mlda = args.model_name == "mlda"
     is_daeevit = args.model_name == "daeevit"
+    is_lamsda = args.model_name == "lamsda"
     test_dataset = build_fold_data(args, {}, mode="test")
     print(f"测试集: {len(test_dataset)} 样本")
 
@@ -966,8 +1182,8 @@ def batch_evaluate_folds(args, device, recorder=None):
         test_loader = torch.utils.data.DataLoader(
             test_dset, batch_size=args.batch_size, shuffle=False
         )
-    elif is_daeevit:
-        # DAEEGViT 需要 (B, C, W) 格式
+    elif is_daeevit or is_lamsda:
+        # DAEEGViT / LA-MSDA 需要 (B, C, W) 格式
         test_windows = np.stack(test_dataset.windows, axis=0)       # (N, W, C)
         test_bcw = test_windows.transpose(0, 2, 1).astype(np.float32)  # (N, C, W)
         test_labels = np.array(test_dataset.labels, dtype=np.int64)
@@ -1016,6 +1232,17 @@ def batch_evaluate_folds(args, device, recorder=None):
         if is_fewshot:
             # 小样本：逐样本预测，使用 observer 记录完整指标
             _fewshot_eval_epoch(model, test_loader, device, observer, criterion_nll, mode="test")
+        elif is_lamsda:
+            # LA-MSDA：集成所有源域分支的预测
+            with torch.no_grad():
+                for batch_data, batch_label in test_loader:
+                    batch_data = batch_data.to(device)
+                    batch_label = batch_label.to(device)
+
+                    avg_probs = model.ensemble_predict(batch_data)
+                    loss = criterion(torch.log(avg_probs + 1e-8), batch_label)
+                    _, predictions = torch.max(avg_probs, dim=1)
+                    observer.test_update(loss, avg_probs, predictions, batch_label)
         elif is_mlda:
             # MLDA：展平向量输入，推理模式 (tar_data=None)
             with torch.no_grad():
@@ -1161,6 +1388,7 @@ def main():
     training_type = getattr(args, "training_type", "")
     is_da = training_type == "domain_adapt"
     is_da_vit = training_type == "domain_adapt_vit"
+    is_ms_da = training_type == "multi_source_da"
 
     # ---- 训练循环 ----
     start_time = time.time()
@@ -1173,6 +1401,8 @@ def main():
             best_val_acc = run_mlda_fold(args, device, fold_idx, fold_config, recorder=recorder)
         elif is_da_vit:
             best_val_acc = run_daeevit_fold(args, device, fold_idx, fold_config, recorder=recorder)
+        elif is_ms_da:
+            best_val_acc = run_lamsda_fold(args, device, fold_idx, fold_config, recorder=recorder)
         elif is_fewshot:
             best_val_acc = run_fewshot_fold(args, device, fold_idx, fold_config, recorder=recorder)
         else:

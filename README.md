@@ -28,6 +28,7 @@
 | | RelationNet | 关系网络，基于可学习关系模块的度量学习 |
 | **域适应** | MLDA | 多级域适应，Wasserstein 域间对齐 + ICD 类条件对比 |
 | | DAEEGViT | 域适应 ViT + MBConv，CLS token MMD 对齐 |
+| | LA-MSDA | 多源标签域适应，LLMMD 标签条件对齐 + 多分类器共识 |
 
 ---
 
@@ -53,6 +54,7 @@ Fatigue-Contrast-exp/
 │   ├── relationnet.py                    # Relation Network
 │   ├── mlda_model.py                     # MLDA 域适应模型 (Encoder+Classifier+U/V)
 │   ├── daeevit_model.py                  # DAEEGViT 域适应 ViT+MBConv 模型
+│   ├── lamsda_model.py                   # LA-MSDA 多源域适应模型 (SharedNet+DSCNN×N)
 │   └── ...                               # 原始模板模型 (ResNet/EfficientNet 等)
 ├── utils/
 │   ├── basic.py                          # 优化器/学习率调度器
@@ -69,6 +71,11 @@ Fatigue-Contrast-exp/
 │   └── load_data2.py                     # 原始 .mat 数据加载
 ├── DAEEGViT/                             # DAEEGViT 原始参考实现 (EEG, 独立运行)
 │   ├── DAEEGViT.py                       # 原始模型代码
+│   └── *.pdf                             # 论文 PDF
+├── LA_MSDA/                              # LA-MSDA 原始参考实现 (EEG, 独立运行)
+│   ├── main_mutil_sources_LAMSDA.py      # 原始训练脚本
+│   ├── DataLoader/                       # 数据加载模块
+│   ├── LAMSDA_Modules/                   # 模型和损失模块
 │   └── *.pdf                             # 论文 PDF
 ├── main_fatigue.py                       # 疲劳检测训练入口 ⭐
 ├── main.py                               # 原始模板训练入口
@@ -207,6 +214,7 @@ python main_fatigue.py --exp_name Fatigue_RelationNet_baseline
 # ---- 域适应基线 ----
 python main_fatigue.py --exp_name Fatigue_MLDA_baseline
 python main_fatigue.py --exp_name Fatigue_DAEEGViT_baseline
+python main_fatigue.py --exp_name Fatigue_LA_MSDA_baseline
 ```
 
 ### 3️⃣ 输出
@@ -311,6 +319,18 @@ result_20260630_143000_Fatigue_LSTM_baseline/
 | `mbconv_expand_ratio` | MBConv 扩展比率 | 4 |
 | `mbconv_se_ratio` | MBConv SE 比率 | 0.25 |
 | `mmd_weight` | MMD 损失权重 | 1.0 |
+
+### 域适应基线特有参数 (LA-MSDA)
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---:|
+| `num_sources` | 源域分支数量上限 | 5 |
+| `feature_dim` | 共享特征提取器输出维度 | 64 |
+| `ds_hidden_dim` | 域特定网络隐藏维度 | 256 |
+| `optimizer_name` | 优化器 (原论文使用 SGD) | `"SGD"` |
+| `lr` | 学习率 | 1e-3 |
+| `epochs` | 训练轮数 | 500 |
+| `da_warmup_scale` | sigmoid 预热陡峭度 | 10.0 |
 
 ### 验证策略
 
@@ -465,6 +485,39 @@ L = L_cls + L_mmd
 - 源域+目标域 batch 配对训练 (`zip(src_loader, tar_loader)`)
 - MMD 无额外调度参数，直接等权加到分类损失上
 
+### LA-MSDA (Label-based Alignment Multi-Source Domain Adaptation)
+
+LA-MSDA 是多源域适应方法，每个源域拥有独立的域特定网络和分类器，共享底层特征提取器。推理时集成所有源域分支的预测。
+
+```
+Input (B, C, W)
+       ↓
+   SharedNet (1D CNN: Conv1d→BN→ELU→Pool × 4 层 → AdaptiveAvgPool)
+       ↓ shared features (B, feature_dim)
+       ↓
+  ┌────┼─────────────┐
+  ↓    ↓             ↓
+DSCNN₁ DSCNN₂  ... DSCNN_N   ← 每个源域一个 (Linear+BN+ReLU × 3)
+  ↓    ↓             ↓
+Cls₁  Cls₂   ...  Cls_N     ← 每个源域一个分类头
+```
+
+**损失函数 (每个源域分支独立计算)**:
+```
+L = L_cls + μ·L_llmmd + γ·L_global
+
+- L_cls:    当前源域分支的交叉熵
+- L_llmmd:  标签条件 MMD (共享特征上，源域用真实标签，目标域用 softmax 伪标签加权核矩阵)
+- L_global: 所有分支在目标域上预测的 L1 分歧 (排序加权)
+- μ, γ:     sigmoid 预热 2/(1+e^(-10·t/T))-1，从 0 渐增到 1
+```
+
+**训练特点**:
+- 多源域: 每个 epoch 轮流训练各源域分支
+- 标签条件对齐: LLMMD 通过类别信息加权核矩阵，避免负迁移
+- 分类器共识: 鼓励所有源域分类器在目标域上达成一致
+- 集成推理: 测试时所有分支 softmax 预测取平均后 argmax
+
 ---
 
 ## 📋 模型参数量
@@ -478,6 +531,7 @@ L = L_cls + L_mmd
 | RelationNet | ~9.9K | hidden=64, emb=32, relation=16 |
 | MLDA | ~482K + 2.2K (U/V) | Encoder 481K, U 1.1K, V 1.1K |
 | DAEEGViT | ~212K | embed=64, depth=4, heads=4, patch=32 |
+| LA-MSDA | ~768K (5分支) | SharedNet ~50K + 5×(DSCNN+Cls) ~144K each |
 
 ---
 
@@ -501,6 +555,7 @@ L = L_cls + L_mmd
 | _(fewshot)_ | `run_fewshot_fold()` | ProtoNet, RelationNet |
 | `domain_adapt` | `run_mlda_fold()` | MLDA |
 | `domain_adapt_vit` | `run_daeevit_fold()` | DAEEGViT |
+| `multi_source_da` | `run_lamsda_fold()` | LA-MSDA |
 
 如需添加新的域适应方法，参考 `run_mlda_fold()` 的双流数据 + 域适应损失模式。
 
@@ -521,6 +576,7 @@ L = L_cls + L_mmd
 - **RelationNet**: Sung et al. *Learning to Compare: Relation Network for Few-Shot Learning*. CVPR, 2018.
 - **MLDA**: Huang et al. *Multi-level domain adaptation for improved generalization in electroencephalogram-based driver fatigue detection*. Engineering Applications of Artificial Intelligence, 2025.
 - **DAEEGViT**: *DAEEGViT: A domain adaptive vision transformer framework for EEG cognitive state identification*.
+- **LA-MSDA**: *Label-based Alignment Multi-Source Domain Adaptation for Cross-subject EEG Fatigue Mental State Evaluation*.
 
 ---
 

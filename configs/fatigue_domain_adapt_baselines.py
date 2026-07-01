@@ -175,4 +175,74 @@ fatigue_da_experiments = {
         "swanlab_description": "Fatigue Detection - DAEEGViT Domain Adaptation Baseline",
         "swanlab_num_samples": 8,
     },
+
+    # ====================================================================== #
+    #                    LA-MSDA 多源标签域适应基线                            #
+    # ====================================================================== #
+    "Fatigue_LA_MSDA_baseline": {
+        # ---- 模型 ----
+        "model_name": "lamsda",
+        "num_classes": 2,
+        "checkpoint_path": None,
+
+        # LA-MSDA 特有参数
+        "num_sources": 5,             # 源域分支数量 (上限，实际=训练受试者数)
+        "feature_dim": 64,            # 共享特征提取器输出维度
+        "ds_hidden_dim": 256,         # 域特定网络隐藏维度
+
+        # ---- 数据 ----
+        "dataset_name": "FatigueDetection",
+        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+
+        # 特征与窗口
+        "feature_name": "deviation_px_before_calibrate",
+        "window_size": 256,
+        "stride": 64,
+        "use_adf": True,
+        "local_mean_size": 16,
+
+        # ---- 数据划分 ----
+        "difficulty": "easy",
+        "test_ids": None,
+        "folds": {
+            1: {"val_ids": ["01", "05", "14", "19"]},
+            2: {"val_ids": ["02", "06", "10", "15"]},
+            3: {"val_ids": ["07", "11", "16", "20"]},
+            4: {"val_ids": ["03", "08", "12", "17"]},
+            5: {"val_ids": ["04", "09", "13", "18"]},
+        },
+
+        # ---- 训练 ----
+        "training_type": "multi_source_da",
+        "trainer_name": "TrainerForLAMSDA",
+        "loss_fn_name": "CrossEntropyLoss",
+        "label_smoothing": 0.0,
+        "optimizer_name": "SGD",
+
+        "batch_size": 128,
+        "epochs": 1000,
+        "patience": 1000,
+        "k_fold": 5,
+        "val_strategy": "kfold",
+
+        # ---- 超参数 ----
+        "lr": 1e-3,
+        "weight_decay": 5e-4,
+        "lr_policy": "none",          # 原论文无 LR 调度，使用 sigmoid 损失调度
+        "lr_decay": 0.95,
+        "niter": 50,
+
+        # ---- LA-MSDA 域适应参数 ----
+        "da_warmup_scale": 10.0,      # sigmoid 预热陡峭度 (原论文=10)
+
+        # ---- 系统 ----
+        "device": "cuda:0",
+        "seed": 42,
+        "output_dir": "./result",
+
+        # ---- SwanLab（可选） ----
+        "use_swanlab": False,
+        "swanlab_description": "Fatigue Detection - LA-MSDA Multi-Source DA Baseline",
+        "swanlab_num_samples": 8,
+    },
 }
