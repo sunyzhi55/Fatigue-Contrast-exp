@@ -1,24 +1,39 @@
 """
 疲劳检测域适应 (Domain Adaptation) 对比方法配置
-包含 MLDA (Multi-Level Domain Adaptation) 方法的实验配置。
+包含以下域适应方法的实验配置:
 
-参考论文:
-    "Multi-level domain adaptation for improved generalization in
-     electroencephalogram-based driver fatigue detection"
-    Engineering Applications of Artificial Intelligence 142 (2025)
+1. MLDA (Multi-Level Domain Adaptation)
+   参考论文: "Multi-level domain adaptation for improved generalization in
+   electroencephalogram-based driver fatigue detection" (EAAI 2025)
+
+2. DAEEGViT (Domain Adaptive EEG Vision Transformer)
+   参考论文: DAEEGViT 域适应方法
+
+3. LA-MSDA (Label-based Alignment Multi-Source Domain Adaptation)
+   参考论文: LA-MSDA 多源域适应方法
+
+4. DANN (Domain-Adversarial Training of Neural Networks)
+   参考论文: Ganin et al., "Domain-Adversarial Training of Neural Networks"
+   (Journal of Machine Learning Research, 2016)
+   - training_type: "dann" 触发 DANN 域对抗训练循环
+   - dann_gamma: GRL sigmoid 调度参数 (论文 Eq.9)
+
+5. DeepCORAL (Deep CORrelation ALignment)
+   参考论文: Sun & Saenko, "Deep CORAL: Correlation Alignment for Deep
+   Domain Adaptation" (ECCV 2016)
+   - training_type: "deepcoral" 触发 DeepCORAL 训练循环
+   - coral_weight: CORAL 损失权重 (论文 Eq.2)
 
 输入适配说明:
-    原论文使用 EEG 差分熵特征 (750维) 作为输入。
-    本配置使用注视偏差序列 (deviation sequences) 的展平向量替代 EEG，
+    所有方法使用注视偏差序列 (deviation sequences) 的展平向量作为输入，
     input_dim = window_size * num_channels (ADF三通道: 256*3=768)。
 
 使用方法:
     python main_fatigue.py --exp_name Fatigue_MLDA_baseline
-
-配置说明:
-    - training_type: "domain_adapt" 触发 MLDA 域适应训练循环
-    - mlda_loss_weight: 域间/域内损失平衡权重 λ (论文 Eq.17)
-    - mlda_lambda_center: sigmoid 调度中心 epoch (论文 Eq.18)
+    python main_fatigue.py --exp_name Fatigue_DAEEGViT_baseline
+    python main_fatigue.py --exp_name Fatigue_LA_MSDA_baseline
+    python main_fatigue.py --exp_name Fatigue_DANN_baseline
+    python main_fatigue.py --exp_name Fatigue_DeepCORAL_baseline
 """
 
 fatigue_da_experiments = {
@@ -243,6 +258,145 @@ fatigue_da_experiments = {
         # ---- SwanLab（可选） ----
         "use_swanlab": False,
         "swanlab_description": "Fatigue Detection - LA-MSDA Multi-Source DA Baseline",
+        "swanlab_num_samples": 8,
+    },
+
+    # ====================================================================== #
+    #                    DANN 域对抗训练基线                                   #
+    # ====================================================================== #
+    "Fatigue_DANN_baseline": {
+        # ---- 模型 ----
+        "model_name": "dann",
+        "num_classes": 2,
+        "checkpoint_path": None,
+
+        # DANN 特有参数
+        "feat_dim": 32,              # 编码器输出特征维度
+        "dropout": 0.05,             # 编码器 Dropout 率
+        "domain_hidden": 1024,       # 域分类器隐藏层维度 (原论文设计)
+
+        # ---- 数据 ----
+        "dataset_name": "FatigueDetection",
+        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+
+        # 特征与窗口
+        "feature_name": "deviation_px_before_calibrate",
+        "window_size": 256,
+        "stride": 64,
+        "use_adf": True,
+        "local_mean_size": 16,
+
+        # ---- 数据划分 ----
+        "difficulty": "easy",
+        "test_ids": None,
+        "folds": {
+            1: {"val_ids": ["01", "05", "14", "19"]},
+            2: {"val_ids": ["02", "06", "10", "15"]},
+            3: {"val_ids": ["07", "11", "16", "20"]},
+            4: {"val_ids": ["03", "08", "12", "17"]},
+            5: {"val_ids": ["04", "09", "13", "18"]},
+        },
+
+        # ---- 训练 ----
+        "training_type": "dann",
+        "trainer_name": "TrainerForDANN",
+        "loss_fn_name": "CrossEntropyLoss",
+        "label_smoothing": 0.0,
+        "optimizer_name": "SGD",
+
+        "batch_size": 128,
+        "epochs": 1000,
+        "patience": 1000,
+        "k_fold": 5,
+        "val_strategy": "kfold",
+
+        # ---- 超参数 ----
+        "lr": 5e-3,
+        "weight_decay": 5e-4,
+        "lr_policy": "onecycle",
+        "lr_decay": 0.95,
+        "niter": 50,
+
+        # ---- DANN 域对抗参数 ----
+        "dann_gamma": 10.0,          # GRL sigmoid 调度陡峭度 (论文 Eq.9: γ=10)
+
+        # ---- 系统 ----
+        "device": "cuda:0",
+        "seed": 42,
+        "output_dir": "./result",
+
+        # ---- SwanLab（可选） ----
+        "use_swanlab": False,
+        "swanlab_description": "Fatigue Detection - DANN Domain Adversarial Baseline",
+        "swanlab_num_samples": 8,
+    },
+
+    # ====================================================================== #
+    #                    DeepCORAL 协方差对齐基线                              #
+    # ====================================================================== #
+    "Fatigue_DeepCORAL_baseline": {
+        # ---- 模型 ----
+        "model_name": "deepcoral",
+        "num_classes": 2,
+        "checkpoint_path": None,
+
+        # DeepCORAL 特有参数
+        "feat_dim": 32,              # 编码器输出特征维度
+        "dropout": 0.05,             # 编码器 Dropout 率
+
+        # ---- 数据 ----
+        "dataset_name": "FatigueDetection",
+        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+
+        # 特征与窗口
+        "feature_name": "deviation_px_before_calibrate",
+        "window_size": 256,
+        "stride": 64,
+        "use_adf": True,
+        "local_mean_size": 16,
+
+        # ---- 数据划分 ----
+        "difficulty": "easy",
+        "test_ids": None,
+        "folds": {
+            1: {"val_ids": ["01", "05", "14", "19"]},
+            2: {"val_ids": ["02", "06", "10", "15"]},
+            3: {"val_ids": ["07", "11", "16", "20"]},
+            4: {"val_ids": ["03", "08", "12", "17"]},
+            5: {"val_ids": ["04", "09", "13", "18"]},
+        },
+
+        # ---- 训练 ----
+        "training_type": "deepcoral",
+        "trainer_name": "TrainerForDeepCORAL",
+        "loss_fn_name": "CrossEntropyLoss",
+        "label_smoothing": 0.0,
+        "optimizer_name": "SGD",
+
+        "batch_size": 128,
+        "epochs": 1000,
+        "patience": 1000,
+        "k_fold": 5,
+        "val_strategy": "kfold",
+
+        # ---- 超参数 ----
+        "lr": 5e-3,
+        "weight_decay": 5e-4,
+        "lr_policy": "onecycle",
+        "lr_decay": 0.95,
+        "niter": 50,
+
+        # ---- DeepCORAL 域适应参数 ----
+        "coral_weight": 1.0,         # CORAL 损失权重 (论文 Eq.2: λ)
+
+        # ---- 系统 ----
+        "device": "cuda:0",
+        "seed": 42,
+        "output_dir": "./result",
+
+        # ---- SwanLab（可选） ----
+        "use_swanlab": False,
+        "swanlab_description": "Fatigue Detection - DeepCORAL Covariance Alignment Baseline",
         "swanlab_num_samples": 8,
     },
 }

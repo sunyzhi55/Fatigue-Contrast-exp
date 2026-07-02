@@ -130,6 +130,28 @@ def get_model(model_name, num_class, pretrained_path, device, **kwargs):
         )
         model = model.to(device)
 
+    # ======================== 经典域适应方法 ======================== #
+    elif model_name == 'dann':
+        from models.dann_model import DANNModel
+        model = DANNModel(
+            input_dim=kwargs.get('input_size', 768),
+            num_classes=num_class,
+            feat_dim=kwargs.get('feat_dim', 32),
+            dropout=kwargs.get('dropout', 0.05),
+            domain_hidden=kwargs.get('domain_hidden', 1024),
+        )
+        model = model.to(device)
+
+    elif model_name == 'deepcoral':
+        from models.deepcoral_model import DeepCORALModel
+        model = DeepCORALModel(
+            input_dim=kwargs.get('input_size', 768),
+            num_classes=num_class,
+            feat_dim=kwargs.get('feat_dim', 32),
+            dropout=kwargs.get('dropout', 0.05),
+        )
+        model = model.to(device)
+
     else:
         raise ValueError(f"Model name '{model_name}' is not recognized.")
 

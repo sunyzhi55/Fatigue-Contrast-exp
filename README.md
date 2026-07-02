@@ -29,6 +29,8 @@
 | **域适应** | MLDA | 多级域适应，Wasserstein 域间对齐 + ICD 类条件对比 |
 | | DAEEGViT | 域适应 ViT + MBConv，CLS token MMD 对齐 |
 | | LA-MSDA | 多源标签域适应，LLMMD 标签条件对齐 + 多分类器共识 |
+| | DANN | 域对抗训练，梯度反转层 (GRL) + 域分类器对抗 |
+| | DeepCORAL | 协方差对齐，二阶统计量 (CORAL) 分布匹配 |
 
 ---
 
@@ -41,7 +43,7 @@ Fatigue-Contrast-exp/
 │   ├── experiments_object.py             # 原始模板实验字典
 │   ├── fatigue_temporal_baselines.py     # 时序基线配置 (LSTM/Transformer/Mamba)
 │   ├── fatigue_fewshot_baselines.py      # 小样本基线配置 (ProtoNet/RelationNet)
-│   └── fatigue_domain_adapt_baselines.py # 域适应基线配置 (MLDA)
+│   └── fatigue_domain_adapt_baselines.py # 域适应基线配置 (MLDA/DAEEGViT/LA-MSDA/DANN/DeepCORAL)
 ├── data/
 │   ├── dataset.py                        # 原始图像数据集
 │   └── fatigue_dataset.py                # 疲劳检测数据集 (JSONL 滑动窗口)
@@ -55,6 +57,8 @@ Fatigue-Contrast-exp/
 │   ├── mlda_model.py                     # MLDA 域适应模型 (Encoder+Classifier+U/V)
 │   ├── daeevit_model.py                  # DAEEGViT 域适应 ViT+MBConv 模型
 │   ├── lamsda_model.py                   # LA-MSDA 多源域适应模型 (SharedNet+DSCNN×N)
+│   ├── dann_model.py                     # DANN 域对抗模型 (Encoder+Classifier+GRL+DomainCls)
+│   ├── deepcoral_model.py                # DeepCORAL 域适应模型 (Encoder+Classifier+CORAL损失)
 │   └── ...                               # 原始模板模型 (ResNet/EfficientNet 等)
 ├── utils/
 │   ├── basic.py                          # 优化器/学习率调度器
@@ -77,6 +81,8 @@ Fatigue-Contrast-exp/
 │   ├── DataLoader/                       # 数据加载模块
 │   ├── LAMSDA_Modules/                   # 模型和损失模块
 │   └── *.pdf                             # 论文 PDF
+├── tests/
+│   └── test_dann_deepcoral.py            # DANN/DeepCORAL 单元测试
 ├── main_fatigue.py                       # 疲劳检测训练入口 ⭐
 ├── main.py                               # 原始模板训练入口
 ├── requirements.txt                      # 依赖清单
@@ -215,6 +221,8 @@ python main_fatigue.py --exp_name Fatigue_RelationNet_baseline
 python main_fatigue.py --exp_name Fatigue_MLDA_baseline
 python main_fatigue.py --exp_name Fatigue_DAEEGViT_baseline
 python main_fatigue.py --exp_name Fatigue_LA_MSDA_baseline
+python main_fatigue.py --exp_name Fatigue_DANN_baseline
+python main_fatigue.py --exp_name Fatigue_DeepCORAL_baseline
 ```
 
 ### 3️⃣ 输出
@@ -332,6 +340,31 @@ result_20260630_143000_Fatigue_LSTM_baseline/
 | `epochs` | 训练轮数 | 500 |
 | `da_warmup_scale` | sigmoid 预热陡峭度 | 10.0 |
 
+### 域适应基线特有参数 (DANN)
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---:|
+| `feat_dim` | 编码器输出特征维度 | 32 |
+| `dropout` | 编码器 Dropout 率 | 0.05 |
+| `domain_hidden` | 域分类器隐藏层维度 | 1024 |
+| `dann_gamma` | GRL sigmoid 调度陡峭度 (论文 Eq.9) | 10.0 |
+| `optimizer_name` | 优化器 (原论文使用 SGD) | `"SGD"` |
+| `lr` | 学习率 | 5e-3 |
+| `weight_decay` | 权重衰减 | 5e-4 |
+| `batch_size` | 批大小 (源域=目标域) | 64 |
+
+### 域适应基线特有参数 (DeepCORAL)
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---:|
+| `feat_dim` | 编码器输出特征维度 | 32 |
+| `dropout` | 编码器 Dropout 率 | 0.05 |
+| `coral_weight` | CORAL 损失权重 (论文 Eq.2) | 1.0 |
+| `optimizer_name` | 优化器 (原论文使用 SGD) | `"SGD"` |
+| `lr` | 学习率 | 5e-3 |
+| `weight_decay` | 权重衰减 | 5e-4 |
+| `batch_size` | 批大小 (源域=目标域) | 64 |
+
 ### 验证策略
 
 通过 `val_strategy` 参数切换 K-Fold 和 LOSO：
@@ -356,7 +389,7 @@ result_20260630_143000_Fatigue_LSTM_baseline/
 # 20 个受试者（去掉 test）→ 自动生成 18 折
 ```
 
-> 💡 **MLDA 域适应说明**: 对于 MLDA，`val_ids` 中的受试者同时作为**目标域**。训练时目标域标签不可见（仅特征参与域适应损失），评估在目标域上进行。如果需要与论文完全对齐（LOSO，每折仅 1 个目标受试者），可使用 `"val_strategy": "loso"`。
+> 💡 **域适应说明**: 对于所有域适应方法 (MLDA/DAEEGViT/LA-MSDA/DANN/DeepCORAL)，`val_ids` 中的受试者同时作为**目标域**。训练时目标域标签不可见（仅特征参与域适应损失），评估在目标域上进行。如果需要与论文完全对齐（LOSO，每折仅 1 个目标受试者），可使用 `"val_strategy": "loso"`。
 
 ---
 
@@ -518,6 +551,81 @@ L = L_cls + μ·L_llmmd + γ·L_global
 - 分类器共识: 鼓励所有源域分类器在目标域上达成一致
 - 集成推理: 测试时所有分支 softmax 预测取平均后 argmax
 
+### DANN (Domain-Adversarial Training of Neural Networks)
+
+DANN 是经典的域对抗训练方法，通过梯度反转层 (GRL) 使特征提取器学习域不变表示，同时域分类器试图区分源域和目标域。
+
+```
+源域数据 ──┐                              ┌── Classifier → 分类损失 L_CE (源域标签)
+           ├→ Encoder (共享) → features ──┤
+目标域数据 ─┘                              └── GRL → DomainClassifier → 域损失 L_d
+                                               ├─ 源域: 标签=0
+                                               └─ 目标域: 标签=1
+```
+
+**GRL (梯度反转层)**:
+```
+前向传播: 恒等映射 (output = input)
+反向传播: grad_output × (-α)
+```
+
+**DomainClassifier** (域分类器):
+```
+features → Linear(→1024) → BN → ReLU → Dropout
+         → Linear(→1024) → BN → ReLU → Dropout
+         → Linear(→1) → domain_logit
+```
+
+**损失函数**:
+```
+L = L_y + λ × L_d
+
+- L_y: 源域交叉熵 (标准监督信号)
+- L_d: 域二分类 BCE (源=0, 目标=1, 通过 GRL 对抗训练)
+- λ:   sigmoid 调度 2/(1+exp(-γ·p))-1，p=step/total_steps
+       从 ~0 (初始仅分类) 渐增到 ~1 (完整对抗)
+```
+
+**训练特点**:
+- 梯度反转: 域分类器的梯度经 GRL 反转后回传到编码器，使编码器"对抗"域分类器
+- λ 调度: 训练初期 λ≈0 (特征先学好分类)，后期 λ→1 (全面对抗)
+- 单优化器统一更新全部参数 (比 MLDA 更简洁)
+- 推理时域分类器不参与，仅使用 Encoder + Classifier
+
+### DeepCORAL (Deep CORrelation ALignment)
+
+DeepCORAL 是最简洁的域适应方法之一，通过对齐源域和目标域特征的二阶统计量 (协方差矩阵) 来减少域偏移。无需对抗训练、无需域分类器。
+
+```
+源域数据 ──┐                              ┌── Classifier → 分类损失 L_CE
+           ├→ Encoder (共享) → features ──┤
+目标域数据 ─┘                              └── CORAL(src_feat, tar_feat) → L_CORAL
+```
+
+**CORAL 损失**:
+```
+L_CORAL = (1 / 4d²) × ||C_s - C_t||_F²
+
+- C_s: 源域特征协方差矩阵 (d×d)
+- C_t: 目标域特征协方差矩阵 (d×d)
+- d:   特征维度
+```
+
+**总损失函数**:
+```
+L = L_cls + λ × L_CORAL
+
+- L_cls:  源域交叉熵
+- L_CORAL: 协方差对齐损失 (Frobenius 范数平方)
+- λ:      CORAL 权重 (可配置，无调度)
+```
+
+**训练特点**:
+- 最简洁的域适应方法: 无对抗训练、无伪标签、无调度参数
+- 单模型 + 单优化器
+- CORAL 损失直接可微，计算开销极低
+- 推理时仅使用 Encoder + Classifier
+
 ---
 
 ## 📋 模型参数量
@@ -532,6 +640,8 @@ L = L_cls + μ·L_llmmd + γ·L_global
 | MLDA | ~482K + 2.2K (U/V) | Encoder 481K, U 1.1K, V 1.1K |
 | DAEEGViT | ~212K | embed=64, depth=4, heads=4, patch=32 |
 | LA-MSDA | ~768K (5分支) | SharedNet ~50K + 5×(DSCNN+Cls) ~144K each |
+| DANN | ~2.6M | Encoder ~482K + Cls ~64 + DomainCls (2×1024) ~2.1M |
+| DeepCORAL | ~482K | Encoder ~481K + Cls ~64 (无域分类器) |
 
 ---
 
@@ -541,13 +651,15 @@ L = L_cls + μ·L_llmmd + γ·L_global
 
 1. 在 `models/` 下创建 `your_model.py`
 2. 在 `models/get_model.py` 中注册
-3. 在 `configs/` 下创建配置字典
-4. 在 `main_fatigue.py` 的 `main()` 中合并配置并添加训练路由
-5. 运行: `python main_fatigue.py --exp_name Your_Exp_Name`
+3. 在 `models/__init__.py` 中添加 import
+4. 在 `configs/` 下创建配置字典
+5. 在 `main_fatigue.py` 的 `main()` 中合并配置并添加训练路由
+6. 在 `tests/` 下编写单元测试
+7. 运行: `python main_fatigue.py --exp_name Your_Exp_Name`
 
 ### 添加新的训练范式
 
-项目当前支持三种 `training_type` 路由：
+项目当前支持以下 `training_type` 路由：
 
 | training_type | 训练函数 | 适用方法 |
 |:---|:---|:---|
@@ -556,14 +668,31 @@ L = L_cls + μ·L_llmmd + γ·L_global
 | `domain_adapt` | `run_mlda_fold()` | MLDA |
 | `domain_adapt_vit` | `run_daeevit_fold()` | DAEEGViT |
 | `multi_source_da` | `run_lamsda_fold()` | LA-MSDA |
+| `dann` | `run_dann_fold()` | DANN |
+| `deepcoral` | `run_deepcoral_fold()` | DeepCORAL |
 
-如需添加新的域适应方法，参考 `run_mlda_fold()` 的双流数据 + 域适应损失模式。
+如需添加新的域适应方法，参考 `run_mlda_fold()` (复杂域适应) 或 `run_deepcoral_fold()` (简洁域适应) 的双流数据 + 域适应损失模式。
 
 ### 自定义数据
 
 如果数据格式不同，修改 `data/fatigue_dataset.py` 中的：
 - `_load_data()`: 数据加载逻辑
 - `__getitem__()`: 返回格式
+
+---
+
+## 🧪 测试
+
+```bash
+# 运行 DANN/DeepCORAL 单元测试 (35 个测试用例)
+python -m pytest tests/test_dann_deepcoral.py -v
+
+# 仅运行特定测试类
+python -m pytest tests/test_dann_deepcoral.py::TestGRL -v
+python -m pytest tests/test_dann_deepcoral.py::TestCORALLoss -v
+```
+
+测试覆盖: GRL 梯度反转、DANN/DeepCORAL 前向/反向传播、CORAL 损失正确性、配置加载、端到端训练步骤、模型参数量统计、多轮训练收敛性。
 
 ---
 
@@ -577,6 +706,8 @@ L = L_cls + μ·L_llmmd + γ·L_global
 - **MLDA**: Huang et al. *Multi-level domain adaptation for improved generalization in electroencephalogram-based driver fatigue detection*. Engineering Applications of Artificial Intelligence, 2025.
 - **DAEEGViT**: *DAEEGViT: A domain adaptive vision transformer framework for EEG cognitive state identification*.
 - **LA-MSDA**: *Label-based Alignment Multi-Source Domain Adaptation for Cross-subject EEG Fatigue Mental State Evaluation*.
+- **DANN**: Ganin et al. *Domain-Adversarial Training of Neural Networks*. Journal of Machine Learning Research (JMLR), 2016.
+- **DeepCORAL**: Sun & Saenko. *Deep CORAL: Correlation Alignment for Deep Domain Adaptation*. ECCV, 2016.
 
 ---
 

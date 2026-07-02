@@ -4,6 +4,7 @@
 支持的实验类型:
 - 时序基线: LSTM, Transformer, Mamba
 - 小样本学习: ProtoNet, RelationNet
+- 域适应: MLDA, DAEEGViT, LA-MSDA, DANN, DeepCORAL
 
 功能:
 - 训练前自动保存配置到 YAML 文件
@@ -14,6 +15,8 @@
 使用方法:
     python main_fatigue.py --exp_name Fatigue_LSTM_baseline
     python main_fatigue.py --exp_name Fatigue_ProtoNet_baseline
+    python main_fatigue.py --exp_name Fatigue_DANN_baseline
+    python main_fatigue.py --exp_name Fatigue_DeepCORAL_baseline
 """
 import sys
 import time
@@ -86,9 +89,10 @@ def build_model_with_kwargs(args, device):
     # MLDA域适应模型: 输入 (B, W*C) 展平向量；input_size = window_size * C
     is_fewshot = args.model_name in ("protonet", "relationnet")
     is_mlda = args.model_name == "mlda"
+    is_flat_da = args.model_name in ("dann", "deepcoral")
     use_adf = getattr(args, "use_adf", True)
     num_channels = 3 if use_adf else 1
-    if is_fewshot or is_mlda:
+    if is_fewshot or is_mlda or is_flat_da:
         input_size = getattr(args, "window_size", 30) * num_channels
     else:
         input_size = num_channels
@@ -126,6 +130,8 @@ def build_model_with_kwargs(args, device):
         "representation_size": getattr(args, "representation_size", None),
         # LA-MSDA 特有参数
         "num_sources": getattr(args, "num_sources", 5),
+        # DANN 特有参数
+        "domain_hidden": getattr(args, "domain_hidden", 1024),
     }
     return get_model(
         args.model_name, args.num_classes,
@@ -1143,6 +1149,345 @@ def run_lamsda_fold(args, device, fold_idx, fold_config, recorder=None):
 
 
 # ========================================================================== #
+#  DANN 域对抗训练/验证（使用 RuntimeObserver）                                #
+# ========================================================================== #
+
+def run_dann_fold(args, device, fold_idx, fold_config, recorder=None):
+    """训练一个 fold 的 DANN 域对抗模型
+
+    训练范式:
+        - 源域 = 训练集受试者（带标签，用于分类损失）
+        - 目标域 = 验证集受试者（无标签，仅特征参与域对抗损失）
+        - 评估在目标域上进行
+
+    损失函数 (论文 Eq.3):
+        L = L_y + λ * L_d
+        - L_y: 源域交叉熵 (对 logits)
+        - L_d: 域二分类 BCE (通过 GRL 对抗训练)
+        - λ: 对抗权重，sigmoid 调度从 0 渐增到 1
+
+    GRL 调度 (论文 Eq.9):
+        p = current_step / total_steps
+        λ = 2/(1 + exp(-10*p)) - 1
+    """
+    print(f"\n{'='*60}")
+    print(f"🔥 Fold {fold_idx} / {args.k_fold} (DANN 域对抗)")
+    print(f"{'='*60}")
+
+    # ---- 构建源域 (train) 和目标域 (val) 数据集 ----
+    source_dataset = build_fold_data(args, fold_config, mode="train")
+    target_dataset = build_fold_data(args, fold_config, mode="val")
+
+    # DANN 需要展平向量输入: (B, W, C) -> (B, W*C)
+    src_windows = np.stack(source_dataset.windows, axis=0)
+    src_flat = src_windows.reshape(src_windows.shape[0], -1).astype(np.float32)
+    src_labels = np.array(source_dataset.labels, dtype=np.int64)
+
+    tar_windows = np.stack(target_dataset.windows, axis=0)
+    tar_flat = tar_windows.reshape(tar_windows.shape[0], -1).astype(np.float32)
+    tar_labels = np.array(target_dataset.labels, dtype=np.int64)
+
+    # 构建 TensorDataset + DataLoader
+    src_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(src_flat), torch.from_numpy(src_labels)
+    )
+    tar_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(tar_flat), torch.from_numpy(tar_labels)
+    )
+
+    batch_size = args.batch_size
+    src_loader = torch.utils.data.DataLoader(src_dset, batch_size=batch_size, shuffle=True)
+    tar_loader = torch.utils.data.DataLoader(tar_dset, batch_size=batch_size, shuffle=True)
+    eval_loader = torch.utils.data.DataLoader(tar_dset, batch_size=batch_size, shuffle=False)
+
+    print(f"源域 (训练): {len(src_dset)} 样本, 目标域 (验证): {len(tar_dset)} 样本")
+
+    # ---- 构建模型 ----
+    model = build_model_with_kwargs(args, device)
+    optimizer = get_optimizer(args.optimizer_name, model.parameters(),
+                              lr=args.lr, weight_decay=args.weight_decay)
+
+    # 学习率调度
+    steps_per_epoch = min(len(src_loader), len(tar_loader))
+    total_steps = args.epochs * steps_per_epoch
+
+    scheduler = None
+    if args.lr_policy == "onecycle":
+        try:
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer, max_lr=args.lr * 5, steps_per_epoch=steps_per_epoch,
+                epochs=args.epochs, anneal_strategy="cos", pct_start=0.1,
+            )
+        except Exception:
+            scheduler = None
+
+    # ---- Observer ----
+    observer = create_observer(args, device, args.save_dir)
+
+    # ---- 损失函数 ----
+    criterion = nn.CrossEntropyLoss(
+        label_smoothing=getattr(args, "label_smoothing", 0.0)
+    ).to(device)
+    domain_criterion = nn.BCEWithLogitsLoss().to(device)
+
+    # DANN 对抗权重调度参数
+    dann_gamma = getattr(args, "dann_gamma", 10.0)
+
+    # ---- 训练循环 ----
+    global_step = 0
+    for epoch in range(1, args.epochs + 1):
+        # === 训练阶段 ===
+        model.train()
+        observer.reset()
+
+        for (src_batch, tar_batch) in zip(src_loader, tar_loader):
+            src_data = src_batch[0].to(device)
+            src_label = src_batch[1].to(device)
+            tar_data = tar_batch[0].to(device)
+
+            if src_data.size(0) != tar_data.size(0):
+                continue
+
+            # DANN GRL 调度 (论文 Eq.9): p ∈ [0, 1], λ = 2/(1+exp(-γp)) - 1
+            p = global_step / max(total_steps, 1)
+            lam = 2.0 / (1.0 + np.exp(-dann_gamma * p)) - 1.0
+            model.grl.set_alpha(lam)
+
+            # 前向传播 (源域 + 目标域)
+            src_feat, src_logits, domain_logits = model(src_data, tar_data)
+
+            # 1) 分类损失 (源域监督)
+            cls_loss = criterion(src_logits, src_label)
+
+            # 2) 域对抗损失 (源=0, 目标=1)
+            src_size = src_data.size(0)
+            tar_size = tar_data.size(0)
+            domain_labels = torch.cat([
+                torch.zeros(src_size, 1, device=device),  # 源域标签=0
+                torch.ones(tar_size, 1, device=device),   # 目标域标签=1
+            ], dim=0)
+            domain_loss = domain_criterion(domain_logits, domain_labels)
+
+            # 总损失: L = L_y + λ * L_d (论文 Eq.3)
+            total_loss = cls_loss + lam * domain_loss
+
+            # 反向传播
+            optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            if scheduler is not None and isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+                scheduler.step()
+
+            global_step += 1
+
+            # 记录训练指标 (使用源域分类结果)
+            prob = torch.softmax(src_logits, dim=1)
+            _, preds = torch.max(prob, dim=1)
+            observer.train_update(cls_loss, prob, preds, src_label)
+
+        # === 验证阶段 (在目标域上评估) ===
+        model.eval()
+        with torch.no_grad():
+            for batch_data, batch_label in eval_loader:
+                batch_data = batch_data.to(device)
+                batch_label = batch_label.to(device)
+
+                _, outputs = model(batch_data, None)  # 推理模式
+                loss = criterion(outputs, batch_label)
+
+                prob = torch.softmax(outputs, dim=1)
+                _, preds = torch.max(prob, dim=1)
+                observer.eval_update(loss, prob, preds, batch_label)
+
+        # === 计算指标、打印、早停、保存最佳模型 ===
+        should_stop = observer.execute(
+            epoch, args.epochs,
+            len(src_loader.dataset), len(eval_loader.dataset),
+            fold=fold_idx, model=model,
+        )
+
+        if recorder is not None:
+            is_best = (observer.best_dicts.get("epoch", 0) == epoch)
+            recorder.record_epoch(observer, fold_idx, epoch, is_best=is_best)
+
+        if scheduler is not None and not isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+            scheduler.step()
+
+        if should_stop:
+            print("⚠️  早停触发")
+            break
+
+    # ---- 记录该 fold 最佳结果 ----
+    observer.finish(fold_idx)
+    best_val_acc = float(observer.best_dicts["Accuracy"])
+    if recorder is not None:
+        recorder.record_best(observer, fold_idx)
+    print(f"Fold {fold_idx} 最佳验证: Acc={best_val_acc:.4f}")
+    return best_val_acc
+
+
+# ========================================================================== #
+#  DeepCORAL 域适应训练/验证（使用 RuntimeObserver）                          #
+# ========================================================================== #
+
+def run_deepcoral_fold(args, device, fold_idx, fold_config, recorder=None):
+    """训练一个 fold 的 DeepCORAL 域适应模型
+
+    训练范式:
+        - 源域 = 训练集受试者（带标签，用于分类损失）
+        - 目标域 = 验证集受试者（无标签，仅特征参与 CORAL 损失）
+        - 评估在目标域上进行
+
+    损失函数 (论文 Eq.2):
+        L = L_cls + λ * L_CORAL
+        - L_cls: 源域交叉熵 (对 logits)
+        - L_CORAL: 协方差对齐损失 (源域 vs 目标域特征)
+        - λ: CORAL 损失权重 (可配置)
+    """
+    from models.deepcoral_model import coral_loss
+
+    print(f"\n{'='*60}")
+    print(f"🔥 Fold {fold_idx} / {args.k_fold} (DeepCORAL 域适应)")
+    print(f"{'='*60}")
+
+    # ---- 构建源域 (train) 和目标域 (val) 数据集 ----
+    source_dataset = build_fold_data(args, fold_config, mode="train")
+    target_dataset = build_fold_data(args, fold_config, mode="val")
+
+    # DeepCORAL 需要展平向量输入: (B, W, C) -> (B, W*C)
+    src_windows = np.stack(source_dataset.windows, axis=0)
+    src_flat = src_windows.reshape(src_windows.shape[0], -1).astype(np.float32)
+    src_labels = np.array(source_dataset.labels, dtype=np.int64)
+
+    tar_windows = np.stack(target_dataset.windows, axis=0)
+    tar_flat = tar_windows.reshape(tar_windows.shape[0], -1).astype(np.float32)
+    tar_labels = np.array(target_dataset.labels, dtype=np.int64)
+
+    # 构建 TensorDataset + DataLoader
+    src_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(src_flat), torch.from_numpy(src_labels)
+    )
+    tar_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(tar_flat), torch.from_numpy(tar_labels)
+    )
+
+    batch_size = args.batch_size
+    src_loader = torch.utils.data.DataLoader(src_dset, batch_size=batch_size, shuffle=True)
+    tar_loader = torch.utils.data.DataLoader(tar_dset, batch_size=batch_size, shuffle=True)
+    eval_loader = torch.utils.data.DataLoader(tar_dset, batch_size=batch_size, shuffle=False)
+
+    print(f"源域 (训练): {len(src_dset)} 样本, 目标域 (验证): {len(tar_dset)} 样本")
+
+    # ---- 构建模型 ----
+    model = build_model_with_kwargs(args, device)
+    optimizer = get_optimizer(args.optimizer_name, model.parameters(),
+                              lr=args.lr, weight_decay=args.weight_decay)
+
+    # 学习率调度
+    steps_per_epoch = min(len(src_loader), len(tar_loader))
+    scheduler = None
+    if args.lr_policy == "onecycle":
+        try:
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer, max_lr=args.lr * 5, steps_per_epoch=steps_per_epoch,
+                epochs=args.epochs, anneal_strategy="cos", pct_start=0.1,
+            )
+        except Exception:
+            scheduler = None
+
+    # ---- Observer ----
+    observer = create_observer(args, device, args.save_dir)
+
+    # ---- 损失函数 ----
+    criterion = nn.CrossEntropyLoss(
+        label_smoothing=getattr(args, "label_smoothing", 0.0)
+    ).to(device)
+    coral_weight = getattr(args, "coral_weight", 1.0)
+
+    # ---- 训练循环 ----
+    for epoch in range(1, args.epochs + 1):
+        # === 训练阶段 ===
+        model.train()
+        observer.reset()
+
+        for (src_batch, tar_batch) in zip(src_loader, tar_loader):
+            src_data = src_batch[0].to(device)
+            src_label = src_batch[1].to(device)
+            tar_data = tar_batch[0].to(device)
+
+            if src_data.size(0) != tar_data.size(0):
+                continue
+
+            # 前向传播 (源域 + 目标域)
+            src_feat, tar_feat, src_logits = model(src_data, tar_data)
+
+            # 1) 分类损失 (源域监督)
+            cls_loss = criterion(src_logits, src_label)
+
+            # 2) CORAL 损失 (协方差对齐)
+            coral = coral_loss(src_feat, tar_feat)
+
+            # 总损失: L = L_cls + λ * L_CORAL
+            total_loss = cls_loss + coral_weight * coral
+
+            # 反向传播
+            optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            if scheduler is not None and isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+                scheduler.step()
+
+            # 记录训练指标 (使用源域分类结果)
+            prob = torch.softmax(src_logits, dim=1)
+            _, preds = torch.max(prob, dim=1)
+            observer.train_update(cls_loss, prob, preds, src_label)
+
+        # === 验证阶段 (在目标域上评估) ===
+        model.eval()
+        with torch.no_grad():
+            for batch_data, batch_label in eval_loader:
+                batch_data = batch_data.to(device)
+                batch_label = batch_label.to(device)
+
+                _, outputs = model(batch_data, None)  # 推理模式
+                loss = criterion(outputs, batch_label)
+
+                prob = torch.softmax(outputs, dim=1)
+                _, preds = torch.max(prob, dim=1)
+                observer.eval_update(loss, prob, preds, batch_label)
+
+        # === 计算指标、打印、早停、保存最佳模型 ===
+        should_stop = observer.execute(
+            epoch, args.epochs,
+            len(src_loader.dataset), len(eval_loader.dataset),
+            fold=fold_idx, model=model,
+        )
+
+        if recorder is not None:
+            is_best = (observer.best_dicts.get("epoch", 0) == epoch)
+            recorder.record_epoch(observer, fold_idx, epoch, is_best=is_best)
+
+        if scheduler is not None and not isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+            scheduler.step()
+
+        if should_stop:
+            print("⚠️  早停触发")
+            break
+
+    # ---- 记录该 fold 最佳结果 ----
+    observer.finish(fold_idx)
+    best_val_acc = float(observer.best_dicts["Accuracy"])
+    if recorder is not None:
+        recorder.record_best(observer, fold_idx)
+    print(f"Fold {fold_idx} 最佳验证: Acc={best_val_acc:.4f}")
+    return best_val_acc
+
+
+# ========================================================================== #
 #  批量测试评估（使用 RuntimeObserver）                                         #
 # ========================================================================== #
 
@@ -1161,6 +1506,9 @@ def batch_evaluate_folds(args, device, recorder=None):
     is_mlda = args.model_name == "mlda"
     is_daeevit = args.model_name == "daeevit"
     is_lamsda = args.model_name == "lamsda"
+    is_dann = args.model_name == "dann"
+    is_deepcoral = args.model_name == "deepcoral"
+    is_flat_da = is_mlda or is_dann or is_deepcoral
     test_dataset = build_fold_data(args, {}, mode="test")
     print(f"测试集: {len(test_dataset)} 样本")
 
@@ -1171,8 +1519,8 @@ def batch_evaluate_folds(args, device, recorder=None):
         test_loader = build_fewshot_loader(
             test_dataset, n_way, k_shot, n_query, 50
         )
-    elif is_mlda:
-        # MLDA 需要展平的向量输入
+    elif is_flat_da:
+        # MLDA / DANN / DeepCORAL 需要展平的向量输入
         test_windows = np.stack(test_dataset.windows, axis=0)
         test_flat = test_windows.reshape(test_windows.shape[0], -1).astype(np.float32)
         test_labels = np.array(test_dataset.labels, dtype=np.int64)
@@ -1243,8 +1591,8 @@ def batch_evaluate_folds(args, device, recorder=None):
                     loss = criterion(torch.log(avg_probs + 1e-8), batch_label)
                     _, predictions = torch.max(avg_probs, dim=1)
                     observer.test_update(loss, avg_probs, predictions, batch_label)
-        elif is_mlda:
-            # MLDA：展平向量输入，推理模式 (tar_data=None)
+        elif is_flat_da:
+            # MLDA / DANN / DeepCORAL：展平向量输入，推理模式 (tar_data=None)
             with torch.no_grad():
                 for batch_data, batch_label in test_loader:
                     batch_data = batch_data.to(device)
@@ -1389,6 +1737,8 @@ def main():
     is_da = training_type == "domain_adapt"
     is_da_vit = training_type == "domain_adapt_vit"
     is_ms_da = training_type == "multi_source_da"
+    is_dann = training_type == "dann"
+    is_deepcoral = training_type == "deepcoral"
 
     # ---- 训练循环 ----
     start_time = time.time()
@@ -1403,6 +1753,10 @@ def main():
             best_val_acc = run_daeevit_fold(args, device, fold_idx, fold_config, recorder=recorder)
         elif is_ms_da:
             best_val_acc = run_lamsda_fold(args, device, fold_idx, fold_config, recorder=recorder)
+        elif is_dann:
+            best_val_acc = run_dann_fold(args, device, fold_idx, fold_config, recorder=recorder)
+        elif is_deepcoral:
+            best_val_acc = run_deepcoral_fold(args, device, fold_idx, fold_config, recorder=recorder)
         elif is_fewshot:
             best_val_acc = run_fewshot_fold(args, device, fold_idx, fold_config, recorder=recorder)
         else:
