@@ -5,6 +5,7 @@
 - 时序基线: LSTM, Transformer, Mamba
 - 小样本学习: ProtoNet, RelationNet
 - 域适应: MLDA, DAEEGViT, LA-MSDA, DANN, DeepCORAL
+- 域泛化: InterpretableCNN
 
 功能:
 - 训练前自动保存配置到 YAML 文件
@@ -32,6 +33,7 @@ from datetime import datetime
 from configs.fatigue_temporal_baselines import fatigue_temporal_experiments
 from configs.fatigue_fewshot_baselines import fatigue_fewshot_experiments
 from configs.fatigue_domain_adapt_baselines import fatigue_da_experiments
+from configs.fatigue_domain_generalization import fatigue_dg_experiments
 from data.fatigue_dataset import (
     FatigueDataset, FewShotFatigueDataset,
     build_temporal_loader, build_fewshot_loader,
@@ -132,6 +134,10 @@ def build_model_with_kwargs(args, device):
         "num_sources": getattr(args, "num_sources", 5),
         # DANN 特有参数
         "domain_hidden": getattr(args, "domain_hidden", 1024),
+        # InterpretableCNN 特有参数
+        "n_filters": getattr(args, "n_filters", 16),
+        "depth_multiplier": getattr(args, "depth_multiplier", 2),
+        "kernel_size": getattr(args, "kernel_size", 64),
     }
     return get_model(
         args.model_name, args.num_classes,
@@ -1488,6 +1494,155 @@ def run_deepcoral_fold(args, device, fold_idx, fold_config, recorder=None):
 
 
 # ========================================================================== #
+#  InterpretableCNN 域泛化训练/验证（使用 RuntimeObserver）                     #
+# ========================================================================== #
+
+def run_interpcnn_fold(args, device, fold_idx, fold_config, recorder=None):
+    """训练一个 fold 的 InterpretableCNN 域泛化模型
+
+    训练范式 (Domain Generalization, 区别于 DA):
+        - 源域 = 训练集受试者（带标签，用于分类损失）
+        - 目标域 = 验证集受试者（完全不参与训练，仅用于评估）
+        - 训练过程中目标域数据不可见（连无标签特征也不使用）
+        - 这与 DANN/DeepCORAL/MLDA 等 DA 方法有本质区别
+
+    损失函数:
+        L = NLLLoss (与模型 LogSoftmax 输出配对)
+
+    输入格式:
+        (B, C, W) — 与 DAEEGViT/LA-MSDA 相同
+        从数据集的 (B, W, C) 转置得到
+
+    参考论文:
+        Cui et al. "EEG-Based Cross-Subject Driver Drowsiness Recognition
+        With an Interpretable Convolutional Neural Network." IEEE TNNLS, 2022.
+    """
+    print(f"\n{'='*60}")
+    print(f"🔥 Fold {fold_idx} / {args.k_fold} (InterpretableCNN 域泛化)")
+    print(f"{'='*60}")
+
+    # ---- 构建训练集和验证集 (DG: 目标域完全不参与训练) ----
+    train_dataset = build_fold_data(args, fold_config, mode="train")
+    val_dataset = build_fold_data(args, fold_config, mode="val")
+
+    # InterpretableCNN 需要 (B, C, W) 格式: (B, W, C) → (B, C, W)
+    use_adf = getattr(args, "use_adf", True)
+
+    train_windows = np.stack(train_dataset.windows, axis=0)  # (N, W, C)
+    train_bcw = train_windows.transpose(0, 2, 1).astype(np.float32)  # (N, C, W)
+    train_labels = np.array(train_dataset.labels, dtype=np.int64)
+
+    val_windows = np.stack(val_dataset.windows, axis=0)
+    val_bcw = val_windows.transpose(0, 2, 1).astype(np.float32)
+    val_labels = np.array(val_dataset.labels, dtype=np.int64)
+
+    # 构建 TensorDataset + DataLoader
+    train_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(train_bcw), torch.from_numpy(train_labels)
+    )
+    val_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(val_bcw), torch.from_numpy(val_labels)
+    )
+
+    batch_size = args.batch_size
+    train_loader = torch.utils.data.DataLoader(
+        train_dset, batch_size=batch_size, shuffle=True
+    )
+    val_loader = torch.utils.data.DataLoader(
+        val_dset, batch_size=batch_size, shuffle=False
+    )
+
+    print(f"训练集: {len(train_dset)} 样本, 验证集: {len(val_dset)} 样本")
+
+    # ---- 构建模型 ----
+    model = build_model_with_kwargs(args, device)
+    optimizer = get_optimizer(args.optimizer_name, model.parameters(),
+                              lr=args.lr, weight_decay=args.weight_decay)
+
+    # 学习率调度
+    scheduler = None
+    if args.lr_policy == "onecycle":
+        try:
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer, max_lr=args.lr * 5, steps_per_epoch=len(train_loader),
+                epochs=args.epochs, anneal_strategy="cos", pct_start=0.1,
+            )
+        except Exception:
+            scheduler = None
+
+    # ---- Observer ----
+    observer = create_observer(args, device, args.save_dir)
+
+    # ---- 损失函数: NLLLoss (与 LogSoftmax 输出配对) ----
+    criterion = nn.NLLLoss().to(device)
+
+    # ---- 训练循环 ----
+    for epoch in range(1, args.epochs + 1):
+        # === 训练阶段 ===
+        model.train()
+        observer.reset()
+
+        for batch_data, batch_label in train_loader:
+            batch_data = batch_data.to(device)
+            batch_label = batch_label.to(device)
+
+            optimizer.zero_grad()
+            log_probs = model(batch_data)
+            loss = criterion(log_probs, batch_label)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            if scheduler is not None and isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+                scheduler.step()
+
+            # 记录训练指标: log_probs → probs
+            prob = torch.exp(log_probs)
+            _, preds = torch.max(prob, dim=1)
+            observer.train_update(loss, prob, preds, batch_label)
+
+        # === 验证阶段 ===
+        model.eval()
+        with torch.no_grad():
+            for batch_data, batch_label in val_loader:
+                batch_data = batch_data.to(device)
+                batch_label = batch_label.to(device)
+
+                log_probs = model(batch_data)
+                loss = criterion(log_probs, batch_label)
+
+                prob = torch.exp(log_probs)
+                _, preds = torch.max(prob, dim=1)
+                observer.eval_update(loss, prob, preds, batch_label)
+
+        # === 计算指标、打印、早停、保存最佳模型 ===
+        should_stop = observer.execute(
+            epoch, args.epochs,
+            len(train_loader.dataset), len(val_loader.dataset),
+            fold=fold_idx, model=model,
+        )
+
+        if recorder is not None:
+            is_best = (observer.best_dicts.get("epoch", 0) == epoch)
+            recorder.record_epoch(observer, fold_idx, epoch, is_best=is_best)
+
+        if scheduler is not None and not isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+            scheduler.step()
+
+        if should_stop:
+            print("⚠️  早停触发")
+            break
+
+    # ---- 记录该 fold 最佳结果 ----
+    observer.finish(fold_idx)
+    best_val_acc = float(observer.best_dicts["Accuracy"])
+    if recorder is not None:
+        recorder.record_best(observer, fold_idx)
+    print(f"Fold {fold_idx} 最佳验证: Acc={best_val_acc:.4f}")
+    return best_val_acc
+
+
+# ========================================================================== #
 #  批量测试评估（使用 RuntimeObserver）                                         #
 # ========================================================================== #
 
@@ -1508,6 +1663,7 @@ def batch_evaluate_folds(args, device, recorder=None):
     is_lamsda = args.model_name == "lamsda"
     is_dann = args.model_name == "dann"
     is_deepcoral = args.model_name == "deepcoral"
+    is_interpcnn = args.model_name == "interpcnn"
     is_flat_da = is_mlda or is_dann or is_deepcoral
     test_dataset = build_fold_data(args, {}, mode="test")
     print(f"测试集: {len(test_dataset)} 样本")
@@ -1530,8 +1686,8 @@ def batch_evaluate_folds(args, device, recorder=None):
         test_loader = torch.utils.data.DataLoader(
             test_dset, batch_size=args.batch_size, shuffle=False
         )
-    elif is_daeevit or is_lamsda:
-        # DAEEGViT / LA-MSDA 需要 (B, C, W) 格式
+    elif is_daeevit or is_lamsda or is_interpcnn:
+        # DAEEGViT / LA-MSDA / InterpretableCNN 需要 (B, C, W) 格式
         test_windows = np.stack(test_dataset.windows, axis=0)       # (N, W, C)
         test_bcw = test_windows.transpose(0, 2, 1).astype(np.float32)  # (N, C, W)
         test_labels = np.array(test_dataset.labels, dtype=np.int64)
@@ -1617,6 +1773,19 @@ def batch_evaluate_folds(args, device, recorder=None):
                     prob = torch.softmax(outputs, dim=1)
                     _, predictions = torch.max(prob, dim=1)
                     observer.test_update(loss, prob, predictions, batch_label)
+        elif is_interpcnn:
+            # InterpretableCNN：(B, C, W) 输入，输出 log-probs
+            with torch.no_grad():
+                for batch_data, batch_label in test_loader:
+                    batch_data = batch_data.to(device)
+                    batch_label = batch_label.to(device)
+
+                    log_probs = model(batch_data)
+                    loss = criterion_nll(log_probs, batch_label)
+
+                    prob = torch.exp(log_probs)
+                    _, predictions = torch.max(prob, dim=1)
+                    observer.test_update(loss, prob, predictions, batch_label)
         else:
             # 时序：标准前向推理，使用 observer 记录完整指标
             with torch.no_grad():
@@ -1676,6 +1845,7 @@ def main():
     all_experiments.update(fatigue_temporal_experiments)
     all_experiments.update(fatigue_fewshot_experiments)
     all_experiments.update(fatigue_da_experiments)
+    all_experiments.update(fatigue_dg_experiments)
 
     if args.exp_name not in all_experiments:
         print(f"❌ 实验 '{args.exp_name}' 未找到。可用实验:")
@@ -1739,6 +1909,7 @@ def main():
     is_ms_da = training_type == "multi_source_da"
     is_dann = training_type == "dann"
     is_deepcoral = training_type == "deepcoral"
+    is_dg_interpcnn = training_type == "dg_interpcnn"
 
     # ---- 训练循环 ----
     start_time = time.time()
@@ -1757,6 +1928,8 @@ def main():
             best_val_acc = run_dann_fold(args, device, fold_idx, fold_config, recorder=recorder)
         elif is_deepcoral:
             best_val_acc = run_deepcoral_fold(args, device, fold_idx, fold_config, recorder=recorder)
+        elif is_dg_interpcnn:
+            best_val_acc = run_interpcnn_fold(args, device, fold_idx, fold_config, recorder=recorder)
         elif is_fewshot:
             best_val_acc = run_fewshot_fold(args, device, fold_idx, fold_config, recorder=recorder)
         else:

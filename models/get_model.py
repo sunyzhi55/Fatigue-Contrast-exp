@@ -152,6 +152,20 @@ def get_model(model_name, num_class, pretrained_path, device, **kwargs):
         )
         model = model.to(device)
 
+    # ======================== 域泛化方法 ======================== #
+    elif model_name == 'interpcnn':
+        from models.interpcnn_model import InterpretableCNN
+        model = InterpretableCNN(
+            in_channels=kwargs.get('in_channels', 3),
+            seq_len=kwargs.get('seq_len', 256),
+            num_classes=num_class,
+            n_filters=kwargs.get('n_filters', 16),
+            depth_multiplier=kwargs.get('depth_multiplier', 2),
+            kernel_size=kwargs.get('kernel_size', 64),
+            dropout=kwargs.get('dropout', 0.0),
+        )
+        model = model.to(device)
+
     else:
         raise ValueError(f"Model name '{model_name}' is not recognized.")
 

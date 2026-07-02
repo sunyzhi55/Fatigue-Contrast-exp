@@ -31,6 +31,7 @@
 | | LA-MSDA | 多源标签域适应，LLMMD 标签条件对齐 + 多分类器共识 |
 | | DANN | 域对抗训练，梯度反转层 (GRL) + 域分类器对抗 |
 | | DeepCORAL | 协方差对齐，二阶统计量 (CORAL) 分布匹配 |
+| **域泛化** | InterpretableCNN | 可解释 CNN，空间-时间可分离卷积，纯 ERM 跨被试泛化 |
 
 ---
 
@@ -41,7 +42,7 @@ Fatigue-Contrast-exp/
 ├── configs/
 │   ├── config.py                         # 原始模板配置
 │   ├── experiments_object.py             # 原始模板实验字典
-│   ├── fatigue_temporal_baselines.py     # 时序基线配置 (LSTM/Transformer/Mamba)
+│   ├── fatigue_temporal_baselines.py     # 时序基线与域泛化配置 (LSTM/Transformer/Mamba/InterpCNN)
 │   ├── fatigue_fewshot_baselines.py      # 小样本基线配置 (ProtoNet/RelationNet)
 │   └── fatigue_domain_adapt_baselines.py # 域适应基线配置 (MLDA/DAEEGViT/LA-MSDA/DANN/DeepCORAL)
 ├── data/
@@ -59,6 +60,7 @@ Fatigue-Contrast-exp/
 │   ├── lamsda_model.py                   # LA-MSDA 多源域适应模型 (SharedNet+DSCNN×N)
 │   ├── dann_model.py                     # DANN 域对抗模型 (Encoder+Classifier+GRL+DomainCls)
 │   ├── deepcoral_model.py                # DeepCORAL 域适应模型 (Encoder+Classifier+CORAL损失)
+│   ├── interpcnn_model.py                # InterpretableCNN 域泛化模型 (可分离卷积)
 │   └── ...                               # 原始模板模型 (ResNet/EfficientNet 等)
 ├── utils/
 │   ├── basic.py                          # 优化器/学习率调度器
@@ -81,8 +83,14 @@ Fatigue-Contrast-exp/
 │   ├── DataLoader/                       # 数据加载模块
 │   ├── LAMSDA_Modules/                   # 模型和损失模块
 │   └── *.pdf                             # 论文 PDF
+├── EEG-based-Cross-Subject-Driver-.../   # InterpretableCNN 原始参考实现 (EEG, 独立运行)
+│   ├── InterpretableCNN.py               # 原始模型 (2D Conv, 30ch EEG)
+│   ├── LeaveOneOut_acc.py                # 原始 LOSO 训练脚本
+│   ├── VisTechnique.py                   # 可解释性可视化
+│   └── *.pdf                             # 论文 PDF
 ├── tests/
-│   └── test_dann_deepcoral.py            # DANN/DeepCORAL 单元测试
+│   ├── test_dann_deepcoral.py            # DANN/DeepCORAL 单元测试
+│   └── test_interpcnn.py                 # InterpretableCNN 单元测试
 ├── main_fatigue.py                       # 疲劳检测训练入口 ⭐
 ├── main.py                               # 原始模板训练入口
 ├── requirements.txt                      # 依赖清单
@@ -223,6 +231,9 @@ python main_fatigue.py --exp_name Fatigue_DAEEGViT_baseline
 python main_fatigue.py --exp_name Fatigue_LA_MSDA_baseline
 python main_fatigue.py --exp_name Fatigue_DANN_baseline
 python main_fatigue.py --exp_name Fatigue_DeepCORAL_baseline
+
+# ---- 域泛化基线 ----
+python main_fatigue.py --exp_name Fatigue_InterpCNN_baseline
 ```
 
 ### 3️⃣ 输出
@@ -364,6 +375,18 @@ result_20260630_143000_Fatigue_LSTM_baseline/
 | `lr` | 学习率 | 5e-3 |
 | `weight_decay` | 权重衰减 | 5e-4 |
 | `batch_size` | 批大小 (源域=目标域) | 64 |
+
+### 域泛化基线特有参数 (InterpretableCNN)
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---:|
+| `n_filters` | 通道混合滤波器数 N1 | 16 |
+| `depth_multiplier` | 深度可分离乘数 d | 2 |
+| `kernel_size` | 时间卷积核大小 | 64 |
+| `dropout` | 分类器前 Dropout 率 | 0.0 |
+| `optimizer_name` | 优化器 (原论文使用 Adam) | `"AdamW"` |
+| `lr` | 学习率 | 1e-3 |
+| `weight_decay` | 权重衰减 | 1e-2 |
 
 ### 验证策略
 
@@ -626,6 +649,41 @@ L = L_cls + λ × L_CORAL
 - CORAL 损失直接可微，计算开销极低
 - 推理时仅使用 Encoder + Classifier
 
+### InterpretableCNN (EEG-Based Cross-Subject Driver Drowsiness Recognition)
+
+InterpretableCNN 是一种轻量级可分离卷积网络，原论文用于 EEG 跨被试疲劳识别。本实现将 2D 卷积分离架构适配为 1D 卷积，处理偏差序列。
+
+**域泛化 (DG) 说明**: 这是纯 ERM (Empirical Risk Minimization) 基线，不含任何域适应/域泛化特有机制。跨被试泛化能力来自 LOSO / K-Fold 评估协议：训练仅在源域被试上进行，测试在未见过的目标域被试上进行，目标域数据完全不参与训练。
+
+```
+Input (B, C, W)
+       ↓
+   Pointwise Conv1d(C → N1, kernel=1)    ← 通道混合 (等效原论文空间滤波)
+       ↓
+   Depthwise Conv1d(N1 → N1×d, kernel=K, groups=N1)  ← 时间滤波 (分组卷积)
+       ↓
+   ReLU → BatchNorm1d (track_running_stats=False)
+       ↓
+   Global Average Pooling (时间维度均值)
+       ↓
+   FC(N1×d → num_classes) → LogSoftmax
+```
+
+**关键设计细节**:
+- `track_running_stats=False`: 评估模式下 BatchNorm 仍使用 batch 统计量 (匹配原论文)
+- 输出为 log-probabilities，配合 NLLLoss 使用
+- 超轻量: 仅 ~2K 参数 (3通道版本)
+
+**损失函数**:
+```
+L = NLLLoss(log_probs, labels)
+```
+
+**训练特点**:
+- 纯监督学习，无域适应损失
+- 目标域数据完全不参与训练 (与 DA 方法本质区别)
+- Adam 优化器 (原论文) / AdamW (本项目默认)
+
 ---
 
 ## 📋 模型参数量
@@ -642,6 +700,7 @@ L = L_cls + λ × L_CORAL
 | LA-MSDA | ~768K (5分支) | SharedNet ~50K + 5×(DSCNN+Cls) ~144K each |
 | DANN | ~2.6M | Encoder ~482K + Cls ~64 + DomainCls (2×1024) ~2.1M |
 | DeepCORAL | ~482K | Encoder ~481K + Cls ~64 (无域分类器) |
+| InterpretableCNN | ~2.6K | Pointwise ~48 + Depthwise ~2K + FC ~64 (超轻量) |
 
 ---
 
@@ -670,6 +729,7 @@ L = L_cls + λ × L_CORAL
 | `multi_source_da` | `run_lamsda_fold()` | LA-MSDA |
 | `dann` | `run_dann_fold()` | DANN |
 | `deepcoral` | `run_deepcoral_fold()` | DeepCORAL |
+| `dg_interpcnn` | `run_interpcnn_fold()` | InterpretableCNN |
 
 如需添加新的域适应方法，参考 `run_mlda_fold()` (复杂域适应) 或 `run_deepcoral_fold()` (简洁域适应) 的双流数据 + 域适应损失模式。
 
@@ -687,12 +747,18 @@ L = L_cls + λ × L_CORAL
 # 运行 DANN/DeepCORAL 单元测试 (35 个测试用例)
 python -m pytest tests/test_dann_deepcoral.py -v
 
+# 运行 InterpretableCNN 单元测试 (21 个测试用例)
+python -m pytest tests/test_interpcnn.py -v
+
+# 运行全部测试
+python -m pytest tests/ -v
+
 # 仅运行特定测试类
 python -m pytest tests/test_dann_deepcoral.py::TestGRL -v
-python -m pytest tests/test_dann_deepcoral.py::TestCORALLoss -v
+python -m pytest tests/test_interpcnn.py::TestArchitecture -v
 ```
 
-测试覆盖: GRL 梯度反转、DANN/DeepCORAL 前向/反向传播、CORAL 损失正确性、配置加载、端到端训练步骤、模型参数量统计、多轮训练收敛性。
+测试覆盖: GRL 梯度反转、DANN/DeepCORAL 前向/反向传播、CORAL 损失正确性、InterpretableCNN 可分离卷积架构、BatchNorm 行为、配置加载、端到端训练步骤、模型参数量统计、多轮训练收敛性。
 
 ---
 
@@ -708,6 +774,7 @@ python -m pytest tests/test_dann_deepcoral.py::TestCORALLoss -v
 - **LA-MSDA**: *Label-based Alignment Multi-Source Domain Adaptation for Cross-subject EEG Fatigue Mental State Evaluation*.
 - **DANN**: Ganin et al. *Domain-Adversarial Training of Neural Networks*. Journal of Machine Learning Research (JMLR), 2016.
 - **DeepCORAL**: Sun & Saenko. *Deep CORAL: Correlation Alignment for Deep Domain Adaptation*. ECCV, 2016.
+- **InterpretableCNN**: Cui et al. *EEG-Based Cross-Subject Driver Drowsiness Recognition With an Interpretable Convolutional Neural Network*. IEEE TNNLS, 2022.
 
 ---
 
