@@ -32,6 +32,7 @@
 | | DANN | 域对抗训练，梯度反转层 (GRL) + 域分类器对抗 |
 | | DeepCORAL | 协方差对齐，二阶统计量 (CORAL) 分布匹配 |
 | **域泛化** | InterpretableCNN | 可解释 CNN，空间-时间可分离卷积，纯 ERM 跨被试泛化 |
+| | AFM-CIR | 因果域泛化，自适应傅里叶 Mixup + 因果启发回归，TPAMI 2026 |
 
 ---
 
@@ -42,9 +43,10 @@ Fatigue-Contrast-exp/
 ├── configs/
 │   ├── config.py                         # 原始模板配置
 │   ├── experiments_object.py             # 原始模板实验字典
-│   ├── fatigue_temporal_baselines.py     # 时序基线与域泛化配置 (LSTM/Transformer/Mamba/InterpCNN)
+│   ├── fatigue_temporal_baselines.py     # 时序基线配置 (LSTM/Transformer/Mamba)
 │   ├── fatigue_fewshot_baselines.py      # 小样本基线配置 (ProtoNet/RelationNet)
-│   └── fatigue_domain_adapt_baselines.py # 域适应基线配置 (MLDA/DAEEGViT/LA-MSDA/DANN/DeepCORAL)
+│   ├── fatigue_domain_adapt_baselines.py # 域适应基线配置 (MLDA/DAEEGViT/LA-MSDA/DANN/DeepCORAL)
+│   └── fatigue_domain_generalization.py  # 域泛化基线配置 (InterpretableCNN/AFM-CIR)
 ├── data/
 │   ├── dataset.py                        # 原始图像数据集
 │   └── fatigue_dataset.py                # 疲劳检测数据集 (JSONL 滑动窗口)
@@ -61,6 +63,7 @@ Fatigue-Contrast-exp/
 │   ├── dann_model.py                     # DANN 域对抗模型 (Encoder+Classifier+GRL+DomainCls)
 │   ├── deepcoral_model.py                # DeepCORAL 域适应模型 (Encoder+Classifier+CORAL损失)
 │   ├── interpcnn_model.py                # InterpretableCNN 域泛化模型 (可分离卷积)
+│   ├── afmcir_model.py                   # AFM-CIR 因果域泛化模型 (AFM增强+CIR训练)
 │   └── ...                               # 原始模板模型 (ResNet/EfficientNet 等)
 ├── utils/
 │   ├── basic.py                          # 优化器/学习率调度器
@@ -189,6 +192,7 @@ data_dir/
 # configs/fatigue_temporal_baselines.py
 # configs/fatigue_fewshot_baselines.py
 # configs/fatigue_domain_adapt_baselines.py
+# configs/fatigue_domain_generalization.py
 
 # 数据目录（修改为你服务器上的实际路径）
 "data_dir": "/your/path/to/jsonl/data",
@@ -234,6 +238,7 @@ python main_fatigue.py --exp_name Fatigue_DeepCORAL_baseline
 
 # ---- 域泛化基线 ----
 python main_fatigue.py --exp_name Fatigue_InterpCNN_baseline
+python main_fatigue.py --exp_name Fatigue_AFM_CIR_baseline
 ```
 
 ### 3️⃣ 输出
@@ -386,6 +391,30 @@ result_20260630_143000_Fatigue_LSTM_baseline/
 | `dropout` | 分类器前 Dropout 率 | 0.0 |
 | `optimizer_name` | 优化器 (原论文使用 Adam) | `"AdamW"` |
 | `lr` | 学习率 | 1e-3 |
+| `weight_decay` | 权重衰减 | 1e-2 |
+
+### 域泛化基线特有参数 (AFM-CIR)
+
+AFM-CIR 是因果域泛化方法，三阶段训练：引导编码器预训练 → AFM 频域增强 → 因果启发训练。目标域数据完全不参与训练。
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---:|
+| `feat_dim` | 骨干网络特征维度 N | 64 |
+| `dropout` | 骨干网络 Dropout 率 | 0.1 |
+| `adv_hidden` | 对抗掩码器隐藏层维度 | 64 |
+| `kappa` | 优势维度比例 (论文 Fig.15) | 0.8 |
+| `guidance_embed_dim` | 引导编码器嵌入维度 | 32 |
+| `guidance_epochs` | 引导编码器预训练轮数 | 50 |
+| `guidance_lr` | 引导编码器学习率 | 1e-3 |
+| `guidance_alpha_adv` | 域对抗损失权重 | 1.0 |
+| `guidance_alpha_rnc` | RNC 对比损失权重 | 1.0 |
+| `afm_gamma_A` | 振幅混合系数下界 (论文 Fig.14) | 0.5 |
+| `afm_gamma_P` | 相位扰动系数下界 (论文 Fig.14) | 0.9 |
+| `afm_eta` | 相位邻居相似度阈值 (论文 Fig.15) | 0.8 |
+| `cir_tau_fac` | FAC 关联因子化损失权重 (论文 Fig.15) | 2.0 |
+| `cir_adv_weight` | 对抗掩码损失权重 | 0.5 |
+| `optimizer_name` | 优化器 | `"AdamW"` |
+| `lr` | 主模型学习率 | 1e-3 |
 | `weight_decay` | 权重衰减 | 1e-2 |
 
 ### 验证策略
@@ -684,6 +713,89 @@ L = NLLLoss(log_probs, labels)
 - 目标域数据完全不参与训练 (与 DA 方法本质区别)
 - Adam 优化器 (原论文) / AdamW (本项目默认)
 
+### AFM-CIR (Causality-Preserving Domain Generalization via Adaptive Fourier Mixup)
+
+AFM-CIR 是一种因果域泛化方法，核心思想是在频域中通过语义相似度引导的自适应增强来丰富训练分布，同时通过因果启发损失确保增强不破坏标签语义。原论文面向 RUL 回归任务，本实现将其适配为二分类疲劳检测。
+
+**三阶段训练流程**:
+```
+Phase 1: 预训练引导编码器 (每个 fold 独立训练)
+  Input (B, C, W) → EncBlock×3 → AdaptiveAvgPool → Linear → z (嵌入)
+                                         ↓ (冻结)
+Phase 2: AFM 频域增强 (每个 batch)
+  x → FFT → (A, P) 振幅/相位
+         ↓ 引导嵌入相似度 → 自适应混合系数 (λ_A, λ_P)
+  A_aug = λ_A·A + (1-λ_A)·A_ref       ← 跨域振幅混合
+  P_aug = P - ΔΘ·(1-λ_P)              ← 有界最短角相位扰动
+  x_aug = IFFT(A_aug · exp(j·P_aug))   ← 重建增强信号
+
+Phase 3: 因果启发训练
+  x, x_aug → Backbone → features, features_aug
+                            ↓
+              ┌─────────────┼────────────────┐
+              ↓             ↓                ↓
+         Classifier     FAC Loss       Adversarial Masker
+         (NLLLoss)   (关联因子化)     (Gumbel-Softmax)
+              ↓             ↓                ↓
+          L_sup        L_fac = ½||C-I||²  L_inf (min-max)
+```
+
+**Backbone** (特征提取器 g_hat):
+```
+Input (B, C, W)
+       ↓
+   Conv1d(C→32, k=7) → BN → ReLU
+   Conv1d(32→64, k=5) → BN → ReLU
+   Conv1d(64→N, k=3)  → BN → ReLU
+   AdaptiveAvgPool1d → Linear(N→N) → features (B, N)
+```
+
+**引导编码器** (Phase 1, 预训练后冻结):
+```
+Encoder:  Conv1d(C→16) → Conv1d(16→32) → Conv1d(32→64) → AdaptiveAvgPool → Linear(64→D)
+Decoder:  Linear(D→64·W/8) → ConvTranspose1d×3 → x_recon
+Domain Classifier: Linear(D→64) → ReLU → Linear(64→num_domains)
+Loss = L_recon + α_adv·L_adv(GRL) + α_rnc·L_rnc
+```
+
+**损失函数**:
+```
+L = L_sup + L_aug + τ·L_FAC + w·L_inf
+
+- L_sup:  原始样本 NLLLoss (分类损失)
+- L_aug:  增强样本 NLLLoss (AFM 增强后的分类损失)
+- L_FAC:  关联因子化损失 (Common Cause + ICM Principle)
+           C_ij = cos(r_i, r^a_j), L = ½||C - I||²_F
+           对角线→1 (增强不变性), 非对角线→0 (维度独立性)
+- L_inf:  对抗掩码损失 (因果充分性, min-max 博弈)
+           masker 选 Top-κ 优势维度 → superior classifier
+           剩余劣势维度 → inferior classifier
+           adversary: max L_inf (暴露劣势维度)
+           backbone:  min L_inf (强制所有维度携带信息)
+- τ, w:   损失权重 (τ=2.0, w=0.5)
+```
+
+**AFM 增强细节**:
+```
+振幅混合: λ_A = 1 - (1-σ_A)^γ_A ∈ (γ_A, 1)
+  σ_A: 引导嵌入相似度, γ_A: 下界控制 (0.5)
+  相似度越高 → λ_A 越小 → 混合越强
+
+相位扰动: λ_P = 1 - (1-σ_P)^γ_P ∈ (γ_P, 1)
+  σ_P: 邻居相似度 (需 ≥ η), γ_P: 下界控制 (0.9)
+  沿最短角路径微调, |ΔΘ| ≤ π, 保持因果语义
+
+理论保证:
+  Theorem 1: ACE ≤ 2C·√(2·I(T;Y))  [互信息上界]
+  Theorem 2: ACE ≤ L_f·C_n·||ΔΦ||_∞·E[||A||²]  [Lipschitz-谱范数界]
+```
+
+**训练特点**:
+- 纯 DG 方法: 目标域数据完全不参与训练
+- 三阶段: Phase 1 预训练 (50 epochs) → Phase 2+3 联合训练
+- 两个独立优化器: 主模型 + 对抗掩码器 (min-max 博弈)
+- 推理时仅使用 Backbone + Classifier (无引导编码器、无掩码器开销)
+
 ---
 
 ## 📋 模型参数量
@@ -701,6 +813,7 @@ L = NLLLoss(log_probs, labels)
 | DANN | ~2.6M | Encoder ~482K + Cls ~64 + DomainCls (2×1024) ~2.1M |
 | DeepCORAL | ~482K | Encoder ~481K + Cls ~64 (无域分类器) |
 | InterpretableCNN | ~2.6K | Pointwise ~48 + Depthwise ~2K + FC ~64 (超轻量) |
+| AFM-CIR | ~47K | Backbone ~42K + Classifier ~130 + Masker ~4K + GuidanceEnc ~50K (冻结) |
 
 ---
 
@@ -730,8 +843,9 @@ L = NLLLoss(log_probs, labels)
 | `dann` | `run_dann_fold()` | DANN |
 | `deepcoral` | `run_deepcoral_fold()` | DeepCORAL |
 | `dg_interpcnn` | `run_interpcnn_fold()` | InterpretableCNN |
+| `dg_afmcir` | `run_afmcir_fold()` | AFM-CIR |
 
-如需添加新的域适应方法，参考 `run_mlda_fold()` (复杂域适应) 或 `run_deepcoral_fold()` (简洁域适应) 的双流数据 + 域适应损失模式。
+如需添加新的域适应方法，参考 `run_mlda_fold()` (复杂域适应) 或 `run_deepcoral_fold()` (简洁域适应) 的双流数据 + 域适应损失模式。如需添加新的域泛化方法，参考 `run_interpcnn_fold()` (纯 ERM 基线) 或 `run_afmcir_fold()` (含数据增强的因果 DG)。
 
 ### 自定义数据
 
@@ -775,6 +889,7 @@ python -m pytest tests/test_interpcnn.py::TestArchitecture -v
 - **DANN**: Ganin et al. *Domain-Adversarial Training of Neural Networks*. Journal of Machine Learning Research (JMLR), 2016.
 - **DeepCORAL**: Sun & Saenko. *Deep CORAL: Correlation Alignment for Deep Domain Adaptation*. ECCV, 2016.
 - **InterpretableCNN**: Cui et al. *EEG-Based Cross-Subject Driver Drowsiness Recognition With an Interpretable Convolutional Neural Network*. IEEE TNNLS, 2022.
+- **AFM-CIR**: Zhu et al. *Causality-Preserving Domain Generalization via Adaptive Fourier Mixup for RUL Prediction*. IEEE TPAMI, 2026. DOI: 10.1109/TPAMI.2026.3688520.
 
 ---
 

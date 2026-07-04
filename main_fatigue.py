@@ -5,7 +5,7 @@
 - 时序基线: LSTM, Transformer, Mamba
 - 小样本学习: ProtoNet, RelationNet
 - 域适应: MLDA, DAEEGViT, LA-MSDA, DANN, DeepCORAL
-- 域泛化: InterpretableCNN
+- 域泛化: InterpretableCNN, AFM-CIR
 
 功能:
 - 训练前自动保存配置到 YAML 文件
@@ -18,6 +18,7 @@
     python main_fatigue.py --exp_name Fatigue_ProtoNet_baseline
     python main_fatigue.py --exp_name Fatigue_DANN_baseline
     python main_fatigue.py --exp_name Fatigue_DeepCORAL_baseline
+    python main_fatigue.py --exp_name Fatigue_AFM_CIR_baseline
 """
 import sys
 import time
@@ -138,6 +139,10 @@ def build_model_with_kwargs(args, device):
         "n_filters": getattr(args, "n_filters", 16),
         "depth_multiplier": getattr(args, "depth_multiplier", 2),
         "kernel_size": getattr(args, "kernel_size", 64),
+        # AFM-CIR 特有参数
+        "feat_dim": getattr(args, "feat_dim", 64),
+        "adv_hidden": getattr(args, "adv_hidden", 64),
+        "kappa": getattr(args, "kappa", 0.8),
     }
     return get_model(
         args.model_name, args.num_classes,
@@ -1642,6 +1647,281 @@ def run_interpcnn_fold(args, device, fold_idx, fold_config, recorder=None):
     return best_val_acc
 
 
+def run_afmcir_fold(args, device, fold_idx, fold_config, recorder=None):
+    """训练一个 fold 的 AFM-CIR 因果域泛化模型
+
+    训练范式 (Domain Generalization, 区别于 DA):
+        - 源域 = 训练集受试者 (带标签, 用于分类损失 + AFM 增强)
+        - 目标域 = 验证集受试者 (完全不参与训练, 仅用于评估)
+        - 训练过程中目标域数据不可见
+
+    三阶段训练流程:
+        Phase 1: 预训练引导编码器 (重建 + 域对抗 + RNC 对比)
+        Phase 2: 使用冻结引导编码器计算 AFM 增强样本
+        Phase 3: 因果启发训练 (分类损失 + FAC 损失 + 对抗掩码)
+
+    损失函数:
+        L = L_sup(CE) + L_aug(CE) + tau * L_FAC + adv_weight * L_inf
+
+    输入格式: (B, C, W) — 与 InterpretableCNN/DAEEGViT 相同
+
+    参考论文:
+        Zhu et al. "Causality-Preserving Domain Generalization via
+        Adaptive Fourier Mixup for RUL Prediction." IEEE TPAMI, 2026.
+    """
+    from models.afmcir_model import (
+        GuidanceEncoder, AFMAugmentation, fac_loss, rnc_loss_binary,
+    )
+
+    print(f"\n{'='*60}")
+    print(f"🔬 Fold {fold_idx} / {args.k_fold} (AFM-CIR 因果域泛化)")
+    print(f"{'='*60}")
+
+    # ---- 构建训练集和验证集 ----
+    train_dataset = build_fold_data(args, fold_config, mode="train")
+    val_dataset = build_fold_data(args, fold_config, mode="val")
+
+    # 数据转换为 (B, C, W) 格式
+    use_adf = getattr(args, "use_adf", True)
+
+    train_windows = np.stack(train_dataset.windows, axis=0)   # (N, W, C)
+    train_bcw = train_windows.transpose(0, 2, 1).astype(np.float32)  # (N, C, W)
+    train_labels = np.array(train_dataset.labels, dtype=np.int64)
+
+    val_windows = np.stack(val_dataset.windows, axis=0)
+    val_bcw = val_windows.transpose(0, 2, 1).astype(np.float32)
+    val_labels = np.array(val_dataset.labels, dtype=np.int64)
+
+    # 构建域标签 (每个受试者一个域)
+    unique_subjects = sorted(set(train_dataset.subject_ids))
+    subject_to_domain = {s: i for i, s in enumerate(unique_subjects)}
+    train_domain_ids = np.array(
+        [subject_to_domain[s] for s in train_dataset.subject_ids],
+        dtype=np.int64,
+    )
+    num_domains = len(unique_subjects)
+
+    # TensorDatasets
+    train_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(train_bcw),
+        torch.from_numpy(train_labels),
+        torch.from_numpy(train_domain_ids),
+    )
+    val_dset = torch.utils.data.TensorDataset(
+        torch.from_numpy(val_bcw), torch.from_numpy(val_labels)
+    )
+
+    batch_size = args.batch_size
+    train_loader = torch.utils.data.DataLoader(
+        train_dset, batch_size=batch_size, shuffle=True
+    )
+    val_loader = torch.utils.data.DataLoader(
+        val_dset, batch_size=batch_size, shuffle=False
+    )
+
+    print(f"训练集: {len(train_dset)} 样本 ({num_domains} 域), "
+          f"验证集: {len(val_dset)} 样本")
+
+    # ================================================================ #
+    #  Phase 1: 预训练引导编码器                                         #
+    # ================================================================ #
+    guidance_epochs = getattr(args, "guidance_epochs", 50)
+    guidance_lr = getattr(args, "guidance_lr", 1e-3)
+    guidance_embed_dim = getattr(args, "guidance_embed_dim", 32)
+    guidance_alpha_adv = getattr(args, "guidance_alpha_adv", 1.0)
+    guidance_alpha_rnc = getattr(args, "guidance_alpha_rnc", 1.0)
+    guidance_tau = getattr(args, "guidance_tau", 0.1)
+    num_channels = 3 if use_adf else 1
+
+    print(f"\n📐 Phase 1: 预训练引导编码器 ({guidance_epochs} epochs)")
+    guidance_encoder = GuidanceEncoder(
+        in_channels=num_channels,
+        seq_len=args.window_size,
+        embed_dim=guidance_embed_dim,
+        num_domains=max(num_domains, 2),
+        alpha_adv=guidance_alpha_adv,
+        alpha_rnc=guidance_alpha_rnc,
+    ).to(device)
+
+    guidance_optimizer = torch.optim.AdamW(
+        guidance_encoder.parameters(), lr=guidance_lr, weight_decay=1e-4,
+    )
+
+    for g_epoch in range(1, guidance_epochs + 1):
+        guidance_encoder.train()
+        total_recon = 0.0
+        count = 0
+        for batch_data, _, batch_domain in train_loader:
+            batch_data = batch_data.to(device)
+            batch_domain = batch_domain.to(device)
+
+            guidance_optimizer.zero_grad()
+            losses = guidance_encoder.pretrain_step(
+                batch_data, batch_domain, tau=guidance_tau
+            )
+            losses["loss"].backward()
+            torch.nn.utils.clip_grad_norm_(guidance_encoder.parameters(), 1.0)
+            guidance_optimizer.step()
+
+            total_recon += losses["loss_recon"].item()
+            count += 1
+
+        if g_epoch % 10 == 0 or g_epoch == 1:
+            avg_recon = total_recon / max(count, 1)
+            print(f"  Guidance Epoch {g_epoch}/{guidance_epochs} — "
+                  f"Recon Loss: {avg_recon:.4f}")
+
+    # 冻结引导编码器
+    guidance_encoder.eval()
+    for p in guidance_encoder.parameters():
+        p.requires_grad_(False)
+
+    # 预计算所有训练样本的引导嵌入 (用于 AFM 的 z_pool)
+    with torch.no_grad():
+        all_x = torch.from_numpy(train_bcw).to(device)
+        z_pool = guidance_encoder.encode(all_x)   # (N_train, embed_dim)
+
+    print(f"✅ 引导编码器预训练完成, 嵌入池: {z_pool.shape}")
+
+    # ================================================================ #
+    #  Phase 2 + 3: AFM 增强 + 因果启发训练                              #
+    # ================================================================ #
+    print(f"\n🔥 Phase 2+3: AFM 增强 + 因果启发训练")
+
+    # 构建主模型
+    model = build_model_with_kwargs(args, device)
+    optimizer = get_optimizer(args.optimizer_name, model.parameters(),
+                              lr=args.lr, weight_decay=args.weight_decay)
+
+    # 对抗掩码器单独优化器 (min-max 博弈)
+    adversary_params = list(model.masker.parameters())
+    adversary_optimizer = torch.optim.AdamW(
+        adversary_params, lr=args.lr, weight_decay=args.weight_decay,
+    )
+
+    # 学习率调度
+    scheduler = None
+    if args.lr_policy == "onecycle":
+        try:
+            scheduler = torch.optim.lr_scheduler.OneCycleLR(
+                optimizer, max_lr=args.lr * 5, steps_per_epoch=len(train_loader),
+                epochs=args.epochs, anneal_strategy="cos", pct_start=0.1,
+            )
+        except Exception:
+            scheduler = None
+
+    # AFM 增强模块
+    afm = AFMAugmentation(
+        gamma_A=getattr(args, "afm_gamma_A", 0.5),
+        gamma_P=getattr(args, "afm_gamma_P", 0.9),
+        eta=getattr(args, "afm_eta", 0.8),
+    )
+
+    # 损失函数
+    criterion = nn.NLLLoss().to(device)
+    tau_fac = getattr(args, "cir_tau_fac", 2.0)
+    adv_weight = getattr(args, "cir_adv_weight", 0.5)
+
+    # ---- Observer ----
+    observer = create_observer(args, device, args.save_dir)
+
+    # ---- 训练循环 ----
+    for epoch in range(1, args.epochs + 1):
+        # === 训练阶段 ===
+        model.train()
+        observer.reset()
+
+        for batch_data, batch_label, _ in train_loader:
+            batch_data = batch_data.to(device)
+            batch_label = batch_label.to(device)
+            B = batch_data.size(0)
+
+            # ---- 前向传播 (原始 + 增强) ----
+            log_probs, features, m_sup, m_inf = model(batch_data)
+
+            # 主分类损失
+            loss_sup = criterion(log_probs, batch_label)
+
+            # AFM 增强 (Phase 2)
+            with torch.no_grad():
+                z_batch = guidance_encoder.encode(batch_data)
+            x_aug = afm.augment(batch_data, z_batch, z_pool)
+
+            # 增强样本分类
+            log_probs_aug, features_aug, _, _ = model(x_aug)
+            loss_aug = criterion(log_probs_aug, batch_label)
+
+            # FAC 损失 (Phase 3: 关联因子化)
+            loss_fac = fac_loss(features, features_aug)
+
+            # ---- 对抗掩码 (因果充分性) ----
+            inferior_feat = features.detach() * m_inf
+            inf_logits = model.classifier(inferior_feat)
+            loss_inf = F.nll_loss(F.log_softmax(inf_logits, dim=1), batch_label)
+
+            # ---- 组合主损失 (最小化) ----
+            main_loss = loss_sup + loss_aug + tau_fac * loss_fac - adv_weight * loss_inf
+
+            optimizer.zero_grad()
+            main_loss.backward(retain_graph=True)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            # ---- 对抗器更新 (最大化 loss_inf) ----
+            adversary_optimizer.zero_grad()
+            adv_loss = -loss_inf
+            adv_loss.backward()
+            adversary_optimizer.step()
+
+            if scheduler is not None and isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+                scheduler.step()
+
+            # 记录训练指标
+            prob = torch.exp(log_probs)
+            _, preds = torch.max(prob, dim=1)
+            observer.train_update(loss_sup, prob, preds, batch_label)
+
+        # === 验证阶段 ===
+        model.eval()
+        with torch.no_grad():
+            for batch_data, batch_label in val_loader:
+                batch_data = batch_data.to(device)
+                batch_label = batch_label.to(device)
+
+                log_probs = model(batch_data)
+                loss = criterion(log_probs, batch_label)
+
+                prob = torch.exp(log_probs)
+                _, preds = torch.max(prob, dim=1)
+                observer.eval_update(loss, prob, preds, batch_label)
+
+        # === 计算指标、打印、早停、保存最佳模型 ===
+        should_stop = observer.execute(
+            epoch, args.epochs,
+            len(train_loader.dataset), len(val_loader.dataset),
+            fold=fold_idx, model=model,
+        )
+
+        if recorder is not None:
+            is_best = (observer.best_dicts.get("epoch", 0) == epoch)
+            recorder.record_epoch(observer, fold_idx, epoch, is_best=is_best)
+
+        if scheduler is not None and not isinstance(scheduler, torch.optim.lr_scheduler.OneCycleLR):
+            scheduler.step()
+
+        if should_stop:
+            print("⚠️  早停触发")
+            break
+
+    # ---- 记录该 fold 最佳结果 ----
+    observer.finish(fold_idx)
+    best_val_acc = float(observer.best_dicts["Accuracy"])
+    if recorder is not None:
+        recorder.record_best(observer, fold_idx)
+    print(f"Fold {fold_idx} 最佳验证: Acc={best_val_acc:.4f}")
+    return best_val_acc
+
+
 # ========================================================================== #
 #  批量测试评估（使用 RuntimeObserver）                                         #
 # ========================================================================== #
@@ -1664,6 +1944,7 @@ def batch_evaluate_folds(args, device, recorder=None):
     is_dann = args.model_name == "dann"
     is_deepcoral = args.model_name == "deepcoral"
     is_interpcnn = args.model_name == "interpcnn"
+    is_afmcir = args.model_name == "afmcir"
     is_flat_da = is_mlda or is_dann or is_deepcoral
     test_dataset = build_fold_data(args, {}, mode="test")
     print(f"测试集: {len(test_dataset)} 样本")
@@ -1686,7 +1967,7 @@ def batch_evaluate_folds(args, device, recorder=None):
         test_loader = torch.utils.data.DataLoader(
             test_dset, batch_size=args.batch_size, shuffle=False
         )
-    elif is_daeevit or is_lamsda or is_interpcnn:
+    elif is_daeevit or is_lamsda or is_interpcnn or is_afmcir:
         # DAEEGViT / LA-MSDA / InterpretableCNN 需要 (B, C, W) 格式
         test_windows = np.stack(test_dataset.windows, axis=0)       # (N, W, C)
         test_bcw = test_windows.transpose(0, 2, 1).astype(np.float32)  # (N, C, W)
@@ -1775,6 +2056,19 @@ def batch_evaluate_folds(args, device, recorder=None):
                     observer.test_update(loss, prob, predictions, batch_label)
         elif is_interpcnn:
             # InterpretableCNN：(B, C, W) 输入，输出 log-probs
+            with torch.no_grad():
+                for batch_data, batch_label in test_loader:
+                    batch_data = batch_data.to(device)
+                    batch_label = batch_label.to(device)
+
+                    log_probs = model(batch_data)
+                    loss = criterion_nll(log_probs, batch_label)
+
+                    prob = torch.exp(log_probs)
+                    _, predictions = torch.max(prob, dim=1)
+                    observer.test_update(loss, prob, predictions, batch_label)
+        elif is_afmcir:
+            # AFM-CIR：(B, C, W) 输入，eval 模式输出 log-probs
             with torch.no_grad():
                 for batch_data, batch_label in test_loader:
                     batch_data = batch_data.to(device)
@@ -1910,6 +2204,7 @@ def main():
     is_dann = training_type == "dann"
     is_deepcoral = training_type == "deepcoral"
     is_dg_interpcnn = training_type == "dg_interpcnn"
+    is_dg_afmcir = training_type == "dg_afmcir"
 
     # ---- 训练循环 ----
     start_time = time.time()
@@ -1930,6 +2225,8 @@ def main():
             best_val_acc = run_deepcoral_fold(args, device, fold_idx, fold_config, recorder=recorder)
         elif is_dg_interpcnn:
             best_val_acc = run_interpcnn_fold(args, device, fold_idx, fold_config, recorder=recorder)
+        elif is_dg_afmcir:
+            best_val_acc = run_afmcir_fold(args, device, fold_idx, fold_config, recorder=recorder)
         elif is_fewshot:
             best_val_acc = run_fewshot_fold(args, device, fold_idx, fold_config, recorder=recorder)
         else:

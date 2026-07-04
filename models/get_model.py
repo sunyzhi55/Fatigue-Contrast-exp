@@ -166,6 +166,20 @@ def get_model(model_name, num_class, pretrained_path, device, **kwargs):
         )
         model = model.to(device)
 
+    # ======================== 因果域泛化方法 ======================== #
+    elif model_name == 'afmcir':
+        from models.afmcir_model import AFMCIRNet
+        model = AFMCIRNet(
+            in_channels=kwargs.get('in_channels', 3),
+            seq_len=kwargs.get('seq_len', 256),
+            num_classes=num_class,
+            feat_dim=kwargs.get('feat_dim', 64),
+            dropout=kwargs.get('dropout', 0.1),
+            adv_hidden=kwargs.get('adv_hidden', 64),
+            kappa=kwargs.get('kappa', 0.8),
+        )
+        model = model.to(device)
+
     else:
         raise ValueError(f"Model name '{model_name}' is not recognized.")
 
