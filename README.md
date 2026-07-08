@@ -24,6 +24,7 @@
 | **时序分类** | LSTM | 长短时记忆网络，经典的时序建模方法 |
 | | Transformer | 基于自注意力的时序编码器 |
 | | Mamba | 基于选择性状态空间模型（S4/S6），线性复杂度的时序建模 |
+| | TimesNet | 时序 2D 变化建模，FFT 多周期发现 + Inception 2D 卷积，ICLR 2023 |
 | **小样本学习** | ProtoNet | 原型网络，基于欧氏距离的度量学习 |
 | | RelationNet | 关系网络，基于可学习关系模块的度量学习 |
 | **域适应** | MLDA | 多级域适应，Wasserstein 域间对齐 + ICD 类条件对比 |
@@ -55,6 +56,7 @@ Fatigue-Contrast-exp/
 │   ├── lstm.py                           # LSTM 分类器
 │   ├── transformer_encoder.py            # Transformer Encoder 分类器
 │   ├── mamba_model.py                    # Mamba 分类器 (基于 mamba-ssm)
+│   ├── timesnet_model.py                 # TimesNet 分类器 (FFT 周期发现 + 2D Inception)
 │   ├── protonet.py                       # Prototypical Networks
 │   ├── relationnet.py                    # Relation Network
 │   ├── mlda_model.py                     # MLDA 域适应模型 (Encoder+Classifier+U/V)
@@ -224,6 +226,7 @@ data_dir/
 python main_fatigue.py --exp_name Fatigue_LSTM_baseline
 python main_fatigue.py --exp_name Fatigue_Transformer_baseline
 python main_fatigue.py --exp_name Fatigue_Mamba_baseline
+python main_fatigue.py --exp_name Fatigue_TimesNet_baseline
 
 # ---- 小样本基线 ----
 python main_fatigue.py --exp_name Fatigue_ProtoNet_baseline
@@ -302,6 +305,17 @@ result_20260630_143000_Fatigue_LSTM_baseline/
 | `d_model` | Transformer/Mamba 模型维度 | 64 |
 | `nhead` | Transformer 注意力头数 | 4 |
 | `d_state` | Mamba SSM 状态维度 | 16 |
+
+### 时序基线特有参数 (TimesNet)
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---:|
+| `d_model` | 模型维度 (论文: min(max(2·ceil(log2(C)),32),64)) | 32 |
+| `d_ff` | Inception 瓶颈层维度 | 64 |
+| `num_kernels` | Inception 核数量 (核大小 1,3,5,7,9,11) | 6 |
+| `top_k` | FFT top-k 周期数 (论文分类默认 3) | 3 |
+| `e_layers` | TimesBlock 层数 (论文分类默认 2) | 2 |
+| `dropout` | Dropout 率 | 0.1 |
 
 ### 小样本基线特有参数 (ProtoNet / RelationNet)
 
@@ -472,6 +486,42 @@ MambaBlock 内部（来自 `mamba-ssm` 包）：
 ```
 x → LayerNorm → [Linear→SiLU→Conv1d→SSM] ⊙ SiLU(gate) → Linear → Dropout + x → y
 ```
+
+### TimesNet
+
+TimesNet 通过 FFT 自动发现多周期性，将 1D 序列重塑为 2D 张量，使用 2D Inception 卷积同时捕获周期间和周期内变化模式。
+
+```
+Input (B, W, C) → DataEmbedding (Conv1d+PosEnc) → (B, W, d_model)
+       ↓
+   [TimesBlock + LayerNorm] × e_layers
+       ↓
+   GELU → Dropout → GlobalAvgPool → Linear → Logits
+```
+
+**TimesBlock** (核心模块):
+```
+x (B, T, d_model)
+  → FFT → top-k 频率 → 周期长度 p = T / freq
+  → 对每个周期:
+      1D → 填充至 p 整数倍 → 重塑 2D (B, d_model, T//p, p)
+      → Inception Block (d_model→d_ff) → GELU
+      → Inception Block (d_ff→d_model)
+      → 重塑回 1D (B, T, d_model)
+  → Softmax(振幅) 加权聚合 k 个周期结果
+  → + x (残差)
+```
+
+**Inception Block** (2D 多尺度卷积):
+```
+x (B, C, H, W) → [Conv2d(k=1,3,5,7,9,11)] → Stack → Mean → (B, C', H, W)
+```
+
+**关键设计**:
+- FFT 周期发现: rfft → 振幅均值 → 去直流 → TopK → period = T/freq
+- 共享 2D 卷积: 同一 Inception 块应用于所有 k 个周期 (参数高效)
+- 自适应聚合: FFT 振幅经 Softmax 作为权重, 加权合并多周期结果
+- 分类头: GlobalAvgPool + FC (比原论文 Flatten+FC 更轻量)
 
 ### ProtoNet
 
@@ -798,22 +848,28 @@ L = L_sup + L_aug + τ·L_FAC + w·L_inf
 
 ---
 
-## 📋 模型参数量
+## 📋 模型参数量与计算量
 
-| 模型 | 参数量 | 说明 |
-|:---|:---:|:---|
-| LSTM | ~71K | hidden=64, layers=2 |
-| Transformer | ~71K | d_model=64, heads=4, layers=2 |
-| Mamba | ~37K | d_model=64, layers=2, d_state=16 |
-| ProtoNet | ~8.5K | hidden=64, emb=32 |
-| RelationNet | ~9.9K | hidden=64, emb=32, relation=16 |
-| MLDA | ~482K + 2.2K (U/V) | Encoder 481K, U 1.1K, V 1.1K |
-| DAEEGViT | ~212K | embed=64, depth=4, heads=4, patch=32 |
-| LA-MSDA | ~768K (5分支) | SharedNet ~50K + 5×(DSCNN+Cls) ~144K each |
-| DANN | ~2.6M | Encoder ~482K + Cls ~64 + DomainCls (2×1024) ~2.1M |
-| DeepCORAL | ~482K | Encoder ~481K + Cls ~64 (无域分类器) |
-| InterpretableCNN | ~2.6K | Pointwise ~48 + Depthwise ~2K + FC ~64 (超轻量) |
-| AFM-CIR | ~47K | Backbone ~42K + Classifier ~130 + Masker ~4K + GuidanceEnc ~50K (冻结) |
+> 使用 `calflops` 库实测，输入 batch_size=1, C=3 (ADF三通道), W=256。
+> 运行 `python stats_model_flops.py` 可重新生成 `model_stats.csv`。
+
+| 模型 | 输入格式 | Params | MACs | FLOPs |
+|:---|:---:|---:|---:|---:|
+| LSTM | (B,W,C) | 71.11 K | 53.38 KMACs | 33.99 MFLOPS |
+| Transformer | (B,W,C) | 71.49 K | 16.83 MMACs | 33.99 MFLOPS |
+| Mamba | (B,W,C) | ~37K* | — | — |
+| TimesNet | (B,W,C) | 2.34 M | 1.82 GMACs | 3.63 GFLOPS |
+| ProtoNet | (B×20,768) | 55.71 K | 1.66 MMACs | 3.33 MFLOPS |
+| RelationNet | (B×20,768) | 57.1 K | 1.71 MMACs | 3.44 MFLOPS |
+| MLDA | (B,768) | 481.7 K | 479.3 KMACs | 960.99 KFLOPS |
+| DAEEGViT | (B,C,W) | 211.57 K | 2.01 MMACs | 4.12 MFLOPS |
+| LA-MSDA | (B,C,W) | 768.27 K | 375.3 KMACs | 772.86 KFLOPS |
+| DANN | (B,768) | 1.57 M | 958.59 KMACs | 1.92 MFLOPS |
+| DeepCORAL | (B,768) | 481.7 K | 958.59 KMACs | 1.92 MFLOPS |
+| InterpretableCNN | (B,C,W) | 2.27 K | 815.23 KMACs | 1.73 MFLOPS |
+| AFM-CIR | (B,C,W) | 36.29 K | 11.89 MMACs | 24.13 MFLOPS |
+
+> *Mamba 需要 CUDA 环境 (`mamba-ssm`, `causal-conv1d`)，标注 * 的数值为估算值。
 
 ---
 
@@ -881,6 +937,7 @@ python -m pytest tests/test_interpcnn.py::TestArchitecture -v
 - **LSTM**: Hochreiter & Schmidhuber. *Long Short-term Memory*. Neural Computation, 1997.
 - **Transformer**: Vaswani et al. *Attention Is All You Need*. NeurIPS, 2017.
 - **Mamba**: Gu & Dao. *Mamba: Linear-Time Sequence Modeling with Selective State Spaces*. 2023.
+- **TimesNet**: Wu et al. *TimesNet: Temporal 2D-Variation Modeling for General Time Series Analysis*. ICLR, 2023.
 - **ProtoNet**: Snell et al. *Prototypical Networks for Few-shot Learning*. NeurIPS, 2017.
 - **RelationNet**: Sung et al. *Learning to Compare: Relation Network for Few-Shot Learning*. CVPR, 2018.
 - **MLDA**: Huang et al. *Multi-level domain adaptation for improved generalization in electroencephalogram-based driver fatigue detection*. Engineering Applications of Artificial Intelligence, 2025.

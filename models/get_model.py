@@ -64,6 +64,21 @@ def get_model(model_name, num_class, pretrained_path, device, **kwargs):
         )
         model = model.to(device)
 
+    elif model_name == 'timesnet':
+        from models.timesnet_model import TimesNetClassifier
+        model = TimesNetClassifier(
+            input_size=kwargs.get('input_size', 3),
+            seq_len=kwargs.get('seq_len', 256),
+            d_model=kwargs.get('d_model', 32),
+            d_ff=kwargs.get('d_ff', 64),
+            num_kernels=kwargs.get('num_kernels', 6),
+            top_k=kwargs.get('top_k', 3),
+            e_layers=kwargs.get('e_layers', 2),
+            num_classes=num_class,
+            dropout=kwargs.get('dropout', 0.1),
+        )
+        model = model.to(device)
+
     # ======================== 小样本学习模型 ======================== #
     elif model_name == 'protonet':
         model = ProtoNet(

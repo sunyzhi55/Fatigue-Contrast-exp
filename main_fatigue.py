@@ -2,7 +2,7 @@
 疲劳检测对比实验训练脚本
 
 支持的实验类型:
-- 时序基线: LSTM, Transformer, Mamba
+- 时序基线: LSTM, Transformer, Mamba, TimesNet
 - 小样本学习: ProtoNet, RelationNet
 - 域适应: MLDA, DAEEGViT, LA-MSDA, DANN, DeepCORAL
 - 域泛化: InterpretableCNN, AFM-CIR
@@ -18,6 +18,7 @@
     python main_fatigue.py --exp_name Fatigue_ProtoNet_baseline
     python main_fatigue.py --exp_name Fatigue_DANN_baseline
     python main_fatigue.py --exp_name Fatigue_DeepCORAL_baseline
+    python main_fatigue.py --exp_name Fatigue_TimesNet_baseline
     python main_fatigue.py --exp_name Fatigue_AFM_CIR_baseline
 """
 import sys
@@ -143,6 +144,11 @@ def build_model_with_kwargs(args, device):
         "feat_dim": getattr(args, "feat_dim", 64),
         "adv_hidden": getattr(args, "adv_hidden", 64),
         "kappa": getattr(args, "kappa", 0.8),
+        # TimesNet 特有参数
+        "d_ff": getattr(args, "d_ff", 64),
+        "num_kernels": getattr(args, "num_kernels", 6),
+        "top_k": getattr(args, "top_k", 3),
+        "e_layers": getattr(args, "e_layers", 2),
     }
     return get_model(
         args.model_name, args.num_classes,
