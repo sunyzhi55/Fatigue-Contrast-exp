@@ -40,6 +40,10 @@ from data.fatigue_dataset import (
     FatigueDataset, FewShotFatigueDataset,
     build_temporal_loader, build_fewshot_loader,
 )
+from data.gaipat_dataset import (
+    GaipatDataset, scan_gaipat_subject_ids,
+    generate_gaipat_loso_folds, generate_gaipat_kfold,
+)
 from models.get_model import get_model
 from utils.basic import get_optimizer, get_scheduler
 from utils.observer import RuntimeObserver
@@ -215,16 +219,18 @@ def build_fold_data(args, fold_config, mode="train"):
 
     Args:
         args: 配置参数
-        fold_config: {"val_ids": [...]}
+        fold_config: {"val_ids": [...], "train_ids": [...](可选)}
         mode: "train" / "val" / "test"
 
     Returns:
-        dataset: FatigueDataset 或 FewShotFatigueDataset
+        dataset: FatigueDataset / GaipatDataset / FewShotFatigueDataset
     """
     is_fewshot = "fewshot" in args.dataset_name.lower()
+    is_gaipat = getattr(args, "data_type", "fatigue") == "gaipat"
     difficulty = getattr(args, "difficulty", None)  # "easy" / "hard" / None
     use_adf = getattr(args, "use_adf", True)
     local_mean_size = getattr(args, "local_mean_size", 16)
+    per_sample_norm = getattr(args, "per_sample_norm", False)
 
     if mode == "test":
         subject_ids = getattr(args, "test_ids", None)
@@ -234,14 +240,29 @@ def build_fold_data(args, fold_config, mode="train"):
         val_ids = fold_config.get("val_ids", [])
         test_ids = getattr(args, "test_ids", []) or []
         exclude_ids = set(val_ids) | set(test_ids)
-        all_subject_ids = getattr(args, "all_subject_ids", None)
-        if all_subject_ids is not None:
-            subject_ids = [s for s in all_subject_ids if s not in exclude_ids]
+        # GAIPAT 的 fold_config 可能显式提供 train_ids
+        if "train_ids" in fold_config and mode == "train":
+            subject_ids = fold_config["train_ids"]
         else:
-            subject_ids = None
+            all_subject_ids = getattr(args, "all_subject_ids", None)
+            if all_subject_ids is not None:
+                subject_ids = [s for s in all_subject_ids if s not in exclude_ids]
+            else:
+                subject_ids = None
 
     adf_kwargs = dict(use_adf=use_adf, local_mean_size=local_mean_size)
-    if is_fewshot:
+
+    if is_gaipat:
+        # GAIPAT 数据集: 使用 GaipatDataset（默认开启 per_sample_norm）
+        dataset = GaipatDataset(
+            data_dir=args.data_dir,
+            window_size=args.window_size,
+            feature_name=getattr(args, "feature_name", "deviation_cm"),
+            subject_ids=subject_ids,
+            per_sample_norm=per_sample_norm,
+            **adf_kwargs,
+        )
+    elif is_fewshot:
         dataset = FewShotFatigueDataset(
             data_dir=args.data_dir,
             window_size=args.window_size,
@@ -249,6 +270,7 @@ def build_fold_data(args, fold_config, mode="train"):
             feature_name=args.feature_name,
             subject_ids=subject_ids,
             difficulty=difficulty,
+            per_sample_norm=per_sample_norm,
             **adf_kwargs,
         )
     else:
@@ -259,10 +281,11 @@ def build_fold_data(args, fold_config, mode="train"):
             feature_name=args.feature_name,
             subject_ids=subject_ids,
             difficulty=difficulty,
+            per_sample_norm=per_sample_norm,
             **adf_kwargs,
         )
 
-    if mode == "train" and subject_ids is None and not is_fewshot:
+    if mode == "train" and subject_ids is None and not is_fewshot and not is_gaipat:
         val_set = set(fold_config.get("val_ids", []))
         test_set = set(getattr(args, "test_ids", []) or [])
         exclude = val_set | test_set
@@ -289,6 +312,83 @@ class _SubsetFatigueDataset(FatigueDataset):
         self.feature_name = parent.feature_name
         self.data_dir = parent.data_dir
         print(f"[_SubsetFatigueDataset] 训练集子集: {self.num_samples} 个样本")
+
+
+class GaipatFewShotAdapter:
+    """
+    将 GaipatDataset 适配为 FewShotFatigueDataset 接口
+    用于 GAIPAT 数据的小样本模型评估 (ProtoNet / RelationNet)
+    """
+
+    def __init__(self, gaipat_dataset):
+        self.window_size = gaipat_dataset.window_size
+        self.use_adf = gaipat_dataset.use_adf
+        self.num_classes = 2
+        self.class_to_samples = {0: [], 1: []}
+
+        for i in range(len(gaipat_dataset)):
+            label = gaipat_dataset.labels[i]
+            self.class_to_samples[label].append({
+                "window": gaipat_dataset.windows[i],
+                "subject_id": gaipat_dataset.subject_ids[i],
+                "file_id": gaipat_dataset.file_ids[i],
+                "difficulty": None,
+            })
+
+        total = sum(len(v) for v in self.class_to_samples.values())
+        print(f"[GaipatFewShotAdapter] {total} samples"
+              f" (alert={len(self.class_to_samples[0])},"
+              f" focused={len(self.class_to_samples[1])})")
+
+        for c in [0, 1]:
+            if len(self.class_to_samples[c]) == 0:
+                raise RuntimeError(f"类别 {c} 没有样本")
+
+    def get_class_samples_count(self):
+        return {c: len(v) for c, v in self.class_to_samples.items()}
+
+    def _flatten_windows(self, items):
+        arr = np.stack([item["window"] for item in items], axis=0)
+        arr = arr.reshape(arr.shape[0], -1)
+        return torch.from_numpy(arr).float()
+
+    def sample_episode(self, n_way=2, k_shot=5, n_query=10):
+        import random
+        available = [c for c in range(self.num_classes)
+                     if len(self.class_to_samples[c]) >= k_shot + n_query]
+        if len(available) < n_way:
+            available = [c for c in range(self.num_classes)
+                         if len(self.class_to_samples[c]) >= k_shot + 1]
+            if len(available) < n_way:
+                raise ValueError(
+                    f"可用类别 ({len(available)}) < n_way ({n_way})"
+                )
+
+        selected_classes = random.sample(available, n_way)
+        support_items, support_labels = [], []
+        query_items, query_labels = [], []
+
+        for new_label, cls in enumerate(selected_classes):
+            samples = self.class_to_samples[cls]
+            selected = random.sample(samples, min(k_shot + n_query, len(samples)))
+            support_items.extend(selected[:k_shot])
+            support_labels.extend([new_label] * k_shot)
+            query_items.extend(selected[k_shot:k_shot + n_query])
+            query_labels.extend([new_label] * n_query)
+
+        return {
+            "support_windows": self._flatten_windows(support_items),
+            "support_labels": torch.tensor(support_labels, dtype=torch.long),
+            "query_windows": self._flatten_windows(query_items),
+            "query_labels": torch.tensor(query_labels, dtype=torch.long),
+        }
+
+    def __len__(self):
+        total = sum(len(v) for v in self.class_to_samples.values())
+        return max(total // 10, 1)
+
+    def __getitem__(self, idx):
+        return self.sample_episode()
 
 
 def create_observer(args, device, log_dir):
@@ -697,9 +797,11 @@ def run_mlda_fold(args, device, fold_idx, fold_config, recorder=None):
             src_label = src_batch[1].to(device)
             tar_data = tar_batch[0].to(device)
 
-            # 跳过 batch size 不匹配的情况
-            if src_data.size(0) != tar_data.size(0):
-                continue
+            # batch size 不一致时截断到较小的一方
+            min_bs = min(src_data.size(0), tar_data.size(0))
+            src_data = src_data[:min_bs]
+            tar_data = tar_data[:min_bs]
+            src_label = src_label[:min_bs]
 
             # 前向传播 (源域 + 目标域)
             src_feat, tar_feat, src_cls, tar_cls = model(src_data, tar_data)
@@ -881,8 +983,11 @@ def run_daeevit_fold(args, device, fold_idx, fold_config, recorder=None):
             src_label = src_batch[1].to(device)
             tar_data = tar_batch[0].to(device)    # (B, C, W)
 
-            if src_data.size(0) != tar_data.size(0):
-                continue
+            # batch size 不一致时截断到较小的一方
+            min_bs = min(src_data.size(0), tar_data.size(0))
+            src_data = src_data[:min_bs]
+            tar_data = tar_data[:min_bs]
+            src_label = src_label[:min_bs]
 
             # 前向传播
             src_logits, src_cls_feat = model(src_data)    # logits + CLS 特征
@@ -1262,8 +1367,11 @@ def run_dann_fold(args, device, fold_idx, fold_config, recorder=None):
             src_label = src_batch[1].to(device)
             tar_data = tar_batch[0].to(device)
 
-            if src_data.size(0) != tar_data.size(0):
-                continue
+            # batch size 不一致时截断到较小的一方
+            min_bs = min(src_data.size(0), tar_data.size(0))
+            src_data = src_data[:min_bs]
+            tar_data = tar_data[:min_bs]
+            src_label = src_label[:min_bs]
 
             # DANN GRL 调度 (论文 Eq.9): p ∈ [0, 1], λ = 2/(1+exp(-γp)) - 1
             p = global_step / max(total_steps, 1)
@@ -1434,8 +1542,11 @@ def run_deepcoral_fold(args, device, fold_idx, fold_config, recorder=None):
             src_label = src_batch[1].to(device)
             tar_data = tar_batch[0].to(device)
 
-            if src_data.size(0) != tar_data.size(0):
-                continue
+            # batch size 不一致时截断到较小的一方
+            min_bs = min(src_data.size(0), tar_data.size(0))
+            src_data = src_data[:min_bs]
+            tar_data = tar_data[:min_bs]
+            src_label = src_label[:min_bs]
 
             # 前向传播 (源域 + 目标域)
             src_feat, tar_feat, src_logits = model(src_data, tar_data)
@@ -2127,7 +2238,281 @@ def batch_evaluate_folds(args, device, recorder=None):
             values = [m[key] for m in all_fold_metrics]
             mean_v = np.mean(values)
             std_v = np.std(values)
-            print(f"  {key}: {mean_v:.4f} ± {std_v:.4f}")
+            print(f"  {key}: {mean_v:.4f} +/- {std_v:.4f}")
+
+    return all_fold_metrics
+
+
+def evaluate_on_dataset(args, device, target_data_dir, checkpoint_dir=None,
+                        test_subject_ids=None, is_gaipat_target=False,
+                        recorder=None, tag="test"):
+    """
+    通用评估函数: 加载每个 fold 的模型并在指定数据集上测试
+
+    支持跨数据集评估:
+    - FatigueGuard 训练的模型 -> GAIPAT 数据测试
+    - GAIPAT 训练的模型 -> FatigueGuard 数据测试
+
+    Args:
+        args: 实验配置
+        device: 计算设备
+        target_data_dir: 目标数据集目录
+        checkpoint_dir: 模型权重目录 (None = args.save_dir)
+        test_subject_ids: 测试受试者 ID 列表 (None = 使用全部)
+        is_gaipat_target: 目标数据集是否为 GAIPAT
+        recorder: MetricsRecorder 实例
+        tag: 结果标签前缀 (如 "gaipat" / "fg" / "test")
+
+    Returns:
+        all_fold_metrics: 各 fold 的测试指标列表
+    """
+    ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else Path(args.save_dir)
+    print(f"\n{'='*60}")
+    print(f"  评估: {tag} (checkpoint: {ckpt_dir})")
+    print(f"  数据: {target_data_dir}")
+    print(f"{'='*60}")
+
+    # ---- 构建测试数据集 ----
+    is_fewshot = "fewshot" in args.dataset_name.lower()
+    use_adf = getattr(args, "use_adf", True)
+    local_mean_size = getattr(args, "local_mean_size", 16)
+    per_sample_norm = getattr(args, "per_sample_norm", False)
+
+    if is_gaipat_target:
+        test_dataset = GaipatDataset(
+            data_dir=target_data_dir,
+            window_size=args.window_size,
+            feature_name="deviation_cm",
+            subject_ids=test_subject_ids,
+            use_adf=use_adf,
+            local_mean_size=local_mean_size,
+            per_sample_norm=per_sample_norm,
+        )
+    elif is_fewshot:
+        test_dataset = FewShotFatigueDataset(
+            data_dir=target_data_dir,
+            window_size=args.window_size,
+            stride=args.stride,
+            feature_name=args.feature_name,
+            subject_ids=test_subject_ids,
+            difficulty=getattr(args, "difficulty", None),
+            use_adf=use_adf,
+            local_mean_size=local_mean_size,
+            per_sample_norm=per_sample_norm,
+        )
+    else:
+        test_dataset = FatigueDataset(
+            data_dir=target_data_dir,
+            window_size=args.window_size,
+            stride=args.stride,
+            feature_name=args.feature_name,
+            subject_ids=test_subject_ids,
+            difficulty=getattr(args, "difficulty", None),
+            use_adf=use_adf,
+            local_mean_size=local_mean_size,
+            per_sample_norm=per_sample_norm,
+        )
+
+    print(f"测试集: {len(test_dataset)} 样本")
+
+    # ---- 构建 DataLoader ----
+    is_mlda = args.model_name == "mlda"
+    is_daeevit = args.model_name == "daeevit"
+    is_lamsda = args.model_name == "lamsda"
+    is_dann = args.model_name == "dann"
+    is_deepcoral = args.model_name == "deepcoral"
+    is_interpcnn = args.model_name == "interpcnn"
+    is_afmcir = args.model_name == "afmcir"
+    is_flat_da = is_mlda or is_dann or is_deepcoral
+
+    if is_fewshot and is_gaipat_target:
+        # GAIPAT + fewshot: 使用适配器
+        adapter = GaipatFewShotAdapter(test_dataset)
+        n_way = getattr(args, "n_way", 2)
+        k_shot = getattr(args, "k_shot", 5)
+        n_query = getattr(args, "n_query", 10)
+        test_loader = build_fewshot_loader(adapter, n_way, k_shot, n_query, 50)
+    elif is_fewshot:
+        n_way = getattr(args, "n_way", 2)
+        k_shot = getattr(args, "k_shot", 5)
+        n_query = getattr(args, "n_query", 10)
+        test_loader = build_fewshot_loader(test_dataset, n_way, k_shot, n_query, 50)
+    elif is_flat_da:
+        test_windows = np.stack(test_dataset.windows, axis=0)
+        test_flat = test_windows.reshape(test_windows.shape[0], -1).astype(np.float32)
+        test_labels = np.array(test_dataset.labels, dtype=np.int64)
+        test_dset = torch.utils.data.TensorDataset(
+            torch.from_numpy(test_flat), torch.from_numpy(test_labels)
+        )
+        test_loader = torch.utils.data.DataLoader(
+            test_dset, batch_size=args.batch_size, shuffle=False
+        )
+    elif is_daeevit or is_lamsda or is_interpcnn or is_afmcir:
+        test_windows = np.stack(test_dataset.windows, axis=0)
+        test_bcw = test_windows.transpose(0, 2, 1).astype(np.float32)
+        test_labels = np.array(test_dataset.labels, dtype=np.int64)
+        test_dset = torch.utils.data.TensorDataset(
+            torch.from_numpy(test_bcw), torch.from_numpy(test_labels)
+        )
+        test_loader = torch.utils.data.DataLoader(
+            test_dset, batch_size=args.batch_size, shuffle=False
+        )
+    else:
+        test_loader = build_temporal_loader(test_dataset, args.batch_size, shuffle=False)
+
+    criterion = nn.CrossEntropyLoss(
+        label_smoothing=getattr(args, "label_smoothing", 0.0)
+    ).to(device)
+    criterion_nll = nn.NLLLoss().to(device)
+
+    all_fold_metrics = []
+
+    for fold_idx in range(1, args.k_fold + 1):
+        model_path = ckpt_dir / f"{args.exp_name}_best_model_fold{fold_idx}.pth"
+        if not model_path.exists():
+            model_path = ckpt_dir / f"best_model_fold{fold_idx}.pth"
+        if not model_path.exists():
+            print(f"  Fold {fold_idx} 模型不存在于 {ckpt_dir}，跳过")
+            continue
+
+        print(f"\n--- {tag} Fold {fold_idx} ---")
+
+        model = build_model_with_kwargs(args, device)
+        model.load_state_dict(torch.load(model_path, map_location=device,
+                                          weights_only=False))
+        model.eval()
+
+        obs_log_dir = Path(args.save_dir) / f"{tag}_fold{fold_idx}"
+        obs_log_dir.mkdir(parents=True, exist_ok=True)
+        observer = RuntimeObserver(
+            log_dir=str(obs_log_dir),
+            device=device,
+            num_classes=args.num_classes,
+            task="multiclass" if args.num_classes > 2 else "binary",
+            average="macro" if args.num_classes > 2 else "micro",
+            patience=999,
+            hyperparameters=vars(args),
+        )
+
+        # ---- 推理 ----
+        if is_fewshot:
+            _fewshot_eval_epoch(model, test_loader, device, observer,
+                                criterion_nll, mode="test")
+        elif is_lamsda:
+            with torch.no_grad():
+                for batch_data, batch_label in test_loader:
+                    batch_data = batch_data.to(device)
+                    batch_label = batch_label.to(device)
+                    avg_probs = model.ensemble_predict(batch_data)
+                    loss = criterion(torch.log(avg_probs + 1e-8), batch_label)
+                    _, predictions = torch.max(avg_probs, dim=1)
+                    observer.test_update(loss, avg_probs, predictions, batch_label)
+        elif is_flat_da:
+            with torch.no_grad():
+                for batch_data, batch_label in test_loader:
+                    batch_data = batch_data.to(device)
+                    batch_label = batch_label.to(device)
+                    _, outputs = model(batch_data, None)
+                    loss = criterion(outputs, batch_label)
+                    prob = torch.softmax(outputs, dim=1)
+                    _, predictions = torch.max(prob, dim=1)
+                    observer.test_update(loss, prob, predictions, batch_label)
+        elif is_daeevit:
+            with torch.no_grad():
+                for batch_data, batch_label in test_loader:
+                    batch_data = batch_data.to(device)
+                    batch_label = batch_label.to(device)
+                    outputs, _ = model(batch_data)
+                    loss = criterion(outputs, batch_label)
+                    prob = torch.softmax(outputs, dim=1)
+                    _, predictions = torch.max(prob, dim=1)
+                    observer.test_update(loss, prob, predictions, batch_label)
+        elif is_interpcnn or is_afmcir:
+            with torch.no_grad():
+                for batch_data, batch_label in test_loader:
+                    batch_data = batch_data.to(device)
+                    batch_label = batch_label.to(device)
+                    log_probs = model(batch_data)
+                    loss = criterion_nll(log_probs, batch_label)
+                    prob = torch.exp(log_probs)
+                    _, predictions = torch.max(prob, dim=1)
+                    observer.test_update(loss, prob, predictions, batch_label)
+        else:
+            with torch.no_grad():
+                for batch in test_loader:
+                    windows = batch["window"].to(device)
+                    labels = batch["label"].to(device)
+                    outputs = model(windows)
+                    loss = criterion(outputs, labels)
+                    prob = torch.softmax(outputs, dim=1)
+                    _, predictions = torch.max(prob, dim=1)
+                    observer.test_update(loss, prob, predictions, labels)
+
+        # ---- 计算指标 ----
+        test_len = (len(test_loader.dataset) if not is_fewshot
+                    else test_loader.dataset.__len__())
+        observer.compute_test_result(test_len)
+
+        # 记录到 CSV (使用独立 recorder 或共享 recorder)
+        if recorder is not None:
+            recorder.record_test(observer, fold_idx)
+
+        # 收集指标
+        metrics = {}
+        for key in ["Accuracy", "Precision", "Recall", "Specificity",
+                     "F1", "BalanceAccuracy", "CohenKappa", "AuRoc"]:
+            val = observer.test_metric.get(key, 0.0)
+            metrics[key] = float(val) if torch.is_tensor(val) else float(val)
+        all_fold_metrics.append(metrics)
+
+    # ---- 汇总 ----
+    if all_fold_metrics:
+        print(f"\n{'='*60}")
+        print(f"  {tag} 汇总结果 ({len(all_fold_metrics)} folds)")
+        print(f"{'='*60}")
+        for key in all_fold_metrics[0].keys():
+            values = [m[key] for m in all_fold_metrics]
+            mean_v = np.mean(values)
+            std_v = np.std(values)
+            print(f"  {key}: {mean_v:.4f} +/- {std_v:.4f}")
+
+        # 保存到独立 CSV
+        _save_cross_eval_csv(all_fold_metrics, args.save_dir, tag)
+
+    return all_fold_metrics
+
+
+def _save_cross_eval_csv(fold_metrics, save_dir, tag):
+    """将跨数据集评估结果保存到独立 CSV 文件"""
+    import csv
+    if not fold_metrics:
+        return
+
+    csv_path = Path(save_dir) / f"{tag}_results.csv"
+    metric_keys = list(fold_metrics[0].keys())
+    header = ["fold"] + metric_keys
+
+    rows = []
+    for i, m in enumerate(fold_metrics, 1):
+        row = {"fold": i}
+        row.update(m)
+        rows.append(row)
+
+    # 添加 mean/std 行
+    mean_row = {"fold": "mean"}
+    std_row = {"fold": "std"}
+    for key in metric_keys:
+        values = [m[key] for m in fold_metrics]
+        mean_row[key] = float(np.mean(values))
+        std_row[key] = float(np.std(values))
+    rows.extend([mean_row, std_row])
+
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=header)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"  结果已保存: {csv_path}")
 
 
 # ========================================================================== #
@@ -2136,9 +2521,65 @@ def batch_evaluate_folds(args, device, recorder=None):
 
 def main():
     # ---- 参数解析 ----
-    parser = argparse.ArgumentParser(description="Fatigue Detection Baselines")
+    parser = argparse.ArgumentParser(
+        description="Fatigue Detection Contrast Experiments",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+评估模式 (--eval_mode):
+  fatigue            FG 数据训练 + FG 数据测试 (默认)
+  fatigue_to_gaipat  FG 数据训练 + GAIPAT 数据测试
+  gaipat             GAIPAT 数据训练 + GAIPAT 数据测试
+  gaipat_to_fatigue  GAIPAT 数据训练 + FG 数据测试
+
+跨数据集测试时使用 --checkpoint_dir 指定已训练模型的权重目录。
+
+示例:
+  # 模式1: FG 训练 + FG 测试
+  python main_fatigue.py --exp_name Fatigue_LSTM_baseline
+
+  # 模式2: FG 训练 + GAIPAT 测试 (加载已有权重)
+  python main_fatigue.py --exp_name Fatigue_LSTM_baseline \\
+      --eval_mode fatigue_to_gaipat \\
+      --gaipat_dir /root/autodl-tmp/shenxy/Data/gaipat/final_relabelled \\
+      --checkpoint_dir ./result_20250101_120000_Fatigue_LSTM_baseline
+
+  # 模式3: GAIPAT 训练 + GAIPAT 测试
+  python main_fatigue.py --exp_name Fatigue_LSTM_baseline \\
+      --eval_mode gaipat \\
+      --gaipat_dir /root/autodl-tmp/shenxy/Data/gaipat/final_relabelled
+
+  # 模式4: GAIPAT 训练 + FG 测试 (加载已有权重)
+  python main_fatigue.py --exp_name Fatigue_LSTM_baseline \\
+      --eval_mode gaipat_to_fatigue \\
+      --gaipat_dir /root/autodl-tmp/shenxy/Data/gaipat/final_relabelled \\
+      --checkpoint_dir ./result_gaipat_20250101_120000_Fatigue_LSTM_baseline
+        """,
+    )
     parser.add_argument("--exp_name", type=str, required=True, help="实验名称")
+    parser.add_argument(
+        "--eval_mode", type=str, default="fatigue",
+        choices=["fatigue", "fatigue_to_gaipat", "gaipat", "gaipat_to_fatigue"],
+        help="评估模式 (默认: fatigue)",
+    )
+    parser.add_argument(
+        "--gaipat_dir", type=str, default=None,
+        help="GAIPAT 数据集根目录 (含 release/ 和 grasp/ 子目录)",
+    )
+    parser.add_argument(
+        "--checkpoint_dir", type=str, default=None,
+        help="跨数据集测试时的模型权重目录 (含 best_model_fold*.pth)",
+    )
+    parser.add_argument(
+        "--gaipat_k_fold", type=int, default=5,
+        help="GAIPAT K-Fold 折数 (默认: 5)",
+    )
+    parser.add_argument(
+        "--per_sample_norm", action="store_true", default=None,
+        help="启用 per-sample Min-Max 归一化 (消除跨数据集尺度差异，跨数据集实验必须开启)",
+    )
     args = parser.parse_args()
+
+    eval_mode = args.eval_mode
 
     # ---- 加载实验配置 ----
     all_experiments = {}
@@ -2148,25 +2589,58 @@ def main():
     all_experiments.update(fatigue_dg_experiments)
 
     if args.exp_name not in all_experiments:
-        print(f"❌ 实验 '{args.exp_name}' 未找到。可用实验:")
+        print(f"  实验 '{args.exp_name}' 未找到。可用实验:")
         for name in all_experiments:
             print(f"  - {name}")
         sys.exit(1)
 
     exp_config = all_experiments[args.exp_name]
-    print(f"✅ 加载实验配置: {args.exp_name}")
+    print(f"  加载实验配置: {args.exp_name}")
+
+    # 保存 CLI 指定的 per_sample_norm（避免被配置覆盖）
+    cli_per_sample_norm = args.per_sample_norm
 
     for key, value in exp_config.items():
         setattr(args, key, value)
+
+    # CLI --per_sample_norm 优先于配置文件
+    if cli_per_sample_norm is not None:
+        args.per_sample_norm = cli_per_sample_norm
+    elif not hasattr(args, "per_sample_norm"):
+        args.per_sample_norm = False
+
+    # ---- GAIPAT 相关覆盖 ----
+    gaipat_dir = args.gaipat_dir
+    original_fg_dir = args.data_dir  # 保留 FG 原始路径
+
+    if eval_mode in ("gaipat", "gaipat_to_fatigue"):
+        # GAIPAT 做训练: 覆盖 data_dir 和特征
+        if gaipat_dir is None:
+            print("  eval_mode 为 gaipat/gaipat_to_fatigue 时必须指定 --gaipat_dir")
+            sys.exit(1)
+        args.data_dir = gaipat_dir
+        args.data_type = "gaipat"
+        args.feature_name = "deviation_cm"
+        args.difficulty = None  # GAIPAT 没有 easy/hard 区分
+        args.test_ids = None    # GAIPAT 测试用全部受试者
+    elif eval_mode == "fatigue_to_gaipat":
+        if gaipat_dir is None:
+            print("  eval_mode 为 fatigue_to_gaipat 时必须指定 --gaipat_dir")
+            sys.exit(1)
+        args.data_type = "fatigue"  # 训练用 FG
+    else:
+        args.data_type = "fatigue"
 
     # ---- 基本设置 ----
     set_global_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"设备: {device}")
+    print(f"评估模式: {eval_mode}")
 
     # ---- 输出目录 ----
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = f"{args.output_dir}_{timestamp}_{args.exp_name}/"
+    mode_tag = f"_{eval_mode}" if eval_mode != "fatigue" else ""
+    save_path = f"{args.output_dir}_{timestamp}_{args.exp_name}{mode_tag}/"
     Path(save_path).mkdir(exist_ok=True, parents=True)
     args.save_dir = save_path
     print(f"输出目录: {save_path}")
@@ -2174,98 +2648,231 @@ def main():
     # ---- 保存配置到 YAML ----
     save_config_yaml(args, save_path)
 
-    # ---- CSV 指标记录器（history.csv + best_results.csv）----
+    # ---- CSV 指标记录器 ----
     recorder = MetricsRecorder(save_path, num_classes=args.num_classes)
 
-    # ---- 数据划分 ----
-    val_strategy = getattr(args, "val_strategy", "kfold")  # "kfold" 或 "loso"
-    test_ids = getattr(args, "test_ids", None)
-    difficulty = getattr(args, "difficulty", None)         # "easy" / "hard" / None
-
-    if difficulty:
-        print(f"任务难度: {difficulty}")
+    # ---- 判断是否需要训练 ----
+    # fatigue: 始终训练
+    # fatigue_to_gaipat: 若提供了 checkpoint_dir 则跳过训练(已有FG权重), 否则先训练
+    # gaipat: 始终训练
+    # gaipat_to_fatigue: 若提供了 checkpoint_dir 则跳过训练(已有GAIPAT权重), 否则先训练
+    checkpoint_provided = args.checkpoint_dir is not None
+    if eval_mode == "fatigue":
+        needs_training = True
+    elif eval_mode == "fatigue_to_gaipat":
+        needs_training = not checkpoint_provided
+    elif eval_mode == "gaipat":
+        needs_training = True
+    elif eval_mode == "gaipat_to_fatigue":
+        needs_training = not checkpoint_provided
     else:
-        print(f"任务难度: 全部 (easy + hard)")
+        needs_training = True
 
-    if val_strategy == "loso":
-        # LOSO: 自动从数据目录读取受试者ID，生成 N 个 fold
-        folds_config, all_subject_ids = generate_loso_folds(args.data_dir, test_ids, difficulty)
-        args.all_subject_ids = all_subject_ids
-        args.k_fold = len(folds_config)
-        print(f"验证策略: LOSO (Leave-One-Subject-Out), 共 {args.k_fold} 折")
-    else:
-        # K-Fold: 使用配置文件中手动指定的 folds
-        folds_config = getattr(args, "folds", {})
-        if not folds_config:
-            print("⚠️  未配置 folds，使用默认单次训练/验证划分。")
-            folds_config = {1: {"val_ids": []}}
-        args.all_subject_ids = scan_subject_ids(args.data_dir, difficulty)
-        print(f"验证策略: K-Fold, 共 {len(folds_config)} 折")
-
-    is_fewshot = "fewshot" in args.dataset_name.lower()
-    training_type = getattr(args, "training_type", "")
-    is_da = training_type == "domain_adapt"
-    is_da_vit = training_type == "domain_adapt_vit"
-    is_ms_da = training_type == "multi_source_da"
-    is_dann = training_type == "dann"
-    is_deepcoral = training_type == "deepcoral"
-    is_dg_interpcnn = training_type == "dg_interpcnn"
-    is_dg_afmcir = training_type == "dg_afmcir"
-
-    # ---- 训练循环 ----
-    start_time = time.time()
-    fold_results = {}
-
-    for fold_idx in sorted(folds_config.keys()):
-        fold_config = folds_config[fold_idx]
-
-        if is_da:
-            best_val_acc = run_mlda_fold(args, device, fold_idx, fold_config, recorder=recorder)
-        elif is_da_vit:
-            best_val_acc = run_daeevit_fold(args, device, fold_idx, fold_config, recorder=recorder)
-        elif is_ms_da:
-            best_val_acc = run_lamsda_fold(args, device, fold_idx, fold_config, recorder=recorder)
-        elif is_dann:
-            best_val_acc = run_dann_fold(args, device, fold_idx, fold_config, recorder=recorder)
-        elif is_deepcoral:
-            best_val_acc = run_deepcoral_fold(args, device, fold_idx, fold_config, recorder=recorder)
-        elif is_dg_interpcnn:
-            best_val_acc = run_interpcnn_fold(args, device, fold_idx, fold_config, recorder=recorder)
-        elif is_dg_afmcir:
-            best_val_acc = run_afmcir_fold(args, device, fold_idx, fold_config, recorder=recorder)
-        elif is_fewshot:
-            best_val_acc = run_fewshot_fold(args, device, fold_idx, fold_config, recorder=recorder)
+    # ---- 跳过训练时，从 checkpoint 目录推断 k_fold ----
+    if not needs_training and checkpoint_provided:
+        ckpt_path = Path(args.checkpoint_dir)
+        if not ckpt_path.exists():
+            print(f"  checkpoint_dir 不存在: {ckpt_path}")
+            sys.exit(1)
+        # 扫描模型文件推断 fold 数量
+        fold_nums = set()
+        for p in ckpt_path.glob("*best_model_fold*.pth"):
+            name = p.stem
+            # 匹配 ...fold{N}.pth
+            import re
+            m = re.search(r'fold(\d+)', name)
+            if m:
+                fold_nums.add(int(m.group(1)))
+        if fold_nums:
+            detected_k = max(fold_nums)
+            args.k_fold = detected_k
+            print(f"  从 checkpoint 推断 k_fold={detected_k} (folds: {sorted(fold_nums)})")
         else:
-            best_val_acc = run_temporal_fold(args, device, fold_idx, fold_config, recorder=recorder)
+            print(f"  未在 {ckpt_path} 中找到模型文件，使用配置中的 k_fold={args.k_fold}")
 
-        fold_results[fold_idx] = best_val_acc
+    if needs_training:
+        # ============================================================== #
+        #  训练阶段                                                       #
+        # ============================================================== #
+        val_strategy = getattr(args, "val_strategy", "kfold")
+        test_ids = getattr(args, "test_ids", None)
+        difficulty = getattr(args, "difficulty", None)
 
-    # ---- 汇总 ----
-    strategy_name = "LOSO" if val_strategy == "loso" else "K-Fold"
-    print(f"\n{'='*60}")
-    print(f"📊 {strategy_name} 训练完成 ({len(folds_config)} 折)")
-    print(f"{'='*60}")
-    for fold_idx, val_acc in fold_results.items():
-        print(f"  Fold {fold_idx}: Val Acc = {val_acc:.4f}")
+        if difficulty:
+            print(f"任务难度: {difficulty}")
+        else:
+            print(f"任务难度: 全部")
 
-    import numpy as np
-    accs = list(fold_results.values())
-    print(f"\n  平均: {np.mean(accs):.4f} ± {np.std(accs):.4f}")
+        is_gaipat_train = args.data_type == "gaipat"
 
-    # ---- 批量测试评估 ----
-    batch_evaluate_folds(args, device, recorder=recorder)
+        if is_gaipat_train:
+            # ---- GAIPAT 数据划分 ----
+            if val_strategy == "loso":
+                folds_config, all_subject_ids = generate_gaipat_loso_folds(
+                    args.data_dir, test_ids
+                )
+                args.all_subject_ids = all_subject_ids
+                args.k_fold = len(folds_config)
+                print(f"GAIPAT LOSO: {args.k_fold} 折")
+            else:
+                folds_config = generate_gaipat_kfold(
+                    args.data_dir, k=args.gaipat_k_fold,
+                    seed=args.seed, test_ids=test_ids,
+                )
+                args.all_subject_ids = scan_gaipat_subject_ids(args.data_dir)
+                args.k_fold = len(folds_config)
+                print(f"GAIPAT K-Fold: {args.k_fold} 折")
+        else:
+            # ---- FatigueGuard 数据划分 ----
+            if val_strategy == "loso":
+                folds_config, all_subject_ids = generate_loso_folds(
+                    args.data_dir, test_ids, difficulty
+                )
+                args.all_subject_ids = all_subject_ids
+                args.k_fold = len(folds_config)
+                print(f"验证策略: LOSO, 共 {args.k_fold} 折")
+            else:
+                folds_config = getattr(args, "folds", {})
+                if not folds_config:
+                    folds_config = {1: {"val_ids": []}}
+                args.all_subject_ids = scan_subject_ids(args.data_dir, difficulty)
+                print(f"验证策略: K-Fold, 共 {len(folds_config)} 折")
 
-    # ---- 保存 CSV 指标文件（history 各 fold 已实时落盘，此处补 best 的 mean/std）----
+        # ---- 训练循环 ----
+        is_fewshot = "fewshot" in args.dataset_name.lower()
+        training_type = getattr(args, "training_type", "")
+        is_da = training_type == "domain_adapt"
+        is_da_vit = training_type == "domain_adapt_vit"
+        is_ms_da = training_type == "multi_source_da"
+        is_dann = training_type == "dann"
+        is_deepcoral = training_type == "deepcoral"
+        is_dg_interpcnn = training_type == "dg_interpcnn"
+        is_dg_afmcir = training_type == "dg_afmcir"
+
+        start_time = time.time()
+        fold_results = {}
+
+        for fold_idx in sorted(folds_config.keys()):
+            fold_config = folds_config[fold_idx]
+
+            if is_da:
+                best_val_acc = run_mlda_fold(args, device, fold_idx, fold_config,
+                                             recorder=recorder)
+            elif is_da_vit:
+                best_val_acc = run_daeevit_fold(args, device, fold_idx, fold_config,
+                                                recorder=recorder)
+            elif is_ms_da:
+                best_val_acc = run_lamsda_fold(args, device, fold_idx, fold_config,
+                                               recorder=recorder)
+            elif is_dann:
+                best_val_acc = run_dann_fold(args, device, fold_idx, fold_config,
+                                             recorder=recorder)
+            elif is_deepcoral:
+                best_val_acc = run_deepcoral_fold(args, device, fold_idx, fold_config,
+                                                  recorder=recorder)
+            elif is_dg_interpcnn:
+                best_val_acc = run_interpcnn_fold(args, device, fold_idx, fold_config,
+                                                  recorder=recorder)
+            elif is_dg_afmcir:
+                best_val_acc = run_afmcir_fold(args, device, fold_idx, fold_config,
+                                               recorder=recorder)
+            elif is_fewshot:
+                best_val_acc = run_fewshot_fold(args, device, fold_idx, fold_config,
+                                                recorder=recorder)
+            else:
+                best_val_acc = run_temporal_fold(args, device, fold_idx, fold_config,
+                                                 recorder=recorder)
+
+            fold_results[fold_idx] = best_val_acc
+
+        # ---- 训练汇总 ----
+        strategy_name = "LOSO" if val_strategy == "loso" else "K-Fold"
+        data_name = "GAIPAT" if is_gaipat_train else "FatigueGuard"
+        print(f"\n{'='*60}")
+        print(f"  {data_name} {strategy_name} 训练完成 ({len(folds_config)} 折)")
+        print(f"{'='*60}")
+        for fold_idx, val_acc in fold_results.items():
+            print(f"  Fold {fold_idx}: Val Acc = {val_acc:.4f}")
+        accs = list(fold_results.values())
+        if accs:
+            print(f"\n  平均: {np.mean(accs):.4f} +/- {np.std(accs):.4f}")
+
+        # ---- 同数据集测试评估 ----
+        if is_gaipat_train:
+            # GAIPAT: 设置 test_ids 为全部受试者，然后使用 batch_evaluate_folds
+            args.test_ids = scan_gaipat_subject_ids(args.data_dir)
+            batch_evaluate_folds(args, device, recorder=recorder)
+        elif test_ids:
+            # FatigueGuard: 使用配置中的 test_ids
+            batch_evaluate_folds(args, device, recorder=recorder)
+
+    # ============================================================== #
+    #  跨数据集评估阶段                                               #
+    # ============================================================== #
+
+    if eval_mode == "fatigue_to_gaipat":
+        # 模式2: FG 训练完成后，在 GAIPAT 上测试
+        print(f"\n{'#'*60}")
+        print(f"  跨数据集评估: FG -> GAIPAT")
+        print(f"{'#'*60}")
+
+        ckpt_dir = args.checkpoint_dir if args.checkpoint_dir else args.save_dir
+        gaipat_all_ids = scan_gaipat_subject_ids(gaipat_dir)
+
+        evaluate_on_dataset(
+            args, device,
+            target_data_dir=gaipat_dir,
+            checkpoint_dir=ckpt_dir,
+            test_subject_ids=None,  # 全部 GAIPAT 受试者
+            is_gaipat_target=True,
+            recorder=None,  # 跨数据集用独立 CSV
+            tag="fg_to_gaipat",
+        )
+
+    elif eval_mode == "gaipat_to_fatigue":
+        # 模式4: GAIPAT 训练完成后，在 FG 上测试
+        print(f"\n{'#'*60}")
+        print(f"  跨数据集评估: GAIPAT -> FatigueGuard")
+        print(f"{'#'*60}")
+
+        ckpt_dir = args.checkpoint_dir if args.checkpoint_dir else args.save_dir
+
+        # 恢复 FG 数据配置
+        args.data_dir = original_fg_dir
+        args.data_type = "fatigue"
+        args.feature_name = exp_config.get("feature_name", "deviation_px_before_calibrate")
+        args.difficulty = exp_config.get("difficulty", "easy")
+
+        # 获取 FG 全部受试者做测试
+        fg_difficulty = exp_config.get("difficulty", None)
+        fg_all_ids = scan_subject_ids(original_fg_dir, fg_difficulty)
+
+        evaluate_on_dataset(
+            args, device,
+            target_data_dir=original_fg_dir,
+            checkpoint_dir=ckpt_dir,
+            test_subject_ids=None,  # 全部 FG 受试者
+            is_gaipat_target=False,
+            recorder=None,
+            tag="gaipat_to_fg",
+        )
+
+    # ---- 保存 CSV 指标文件 ----
     best_path, fold_paths = recorder.save()
-    print(f"\n✅ 各 fold 最佳结果已实时写入: {best_path}（末尾含 mean/std）")
-    print(f"✅ 各 fold 每轮指标历史（实时写入）: {fold_paths}")
+    if best_path.exists():
+        print(f"\n  best_results: {best_path}")
+    if fold_paths:
+        print(f"  fold histories: {[str(p) for p in fold_paths]}")
 
     # ---- 耗时 ----
-    elapsed = time.time() - start_time
-    hours = int(elapsed // 3600)
-    minutes = int((elapsed % 3600) // 60)
-    seconds = int(elapsed % 60)
-    print(f"\n总耗时: {hours}h {minutes}m {seconds}s")
+    if needs_training:
+        elapsed = time.time() - start_time
+        hours = int(elapsed // 3600)
+        minutes = int((elapsed % 3600) // 60)
+        seconds = int(elapsed % 60)
+        print(f"\n总耗时: {hours}h {minutes}m {seconds}s")
+
+    print(f"\n  完成! 评估模式: {eval_mode}")
 
 
 if __name__ == "__main__":

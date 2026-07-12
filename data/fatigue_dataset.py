@@ -82,6 +82,7 @@ class FatigueDataset(Dataset):
         difficulty: Optional[str] = None,
         use_adf: bool = True,
         local_mean_size: int = 16,
+        per_sample_norm: bool = False,
     ):
         """
         Args:
@@ -93,6 +94,8 @@ class FatigueDataset(Dataset):
             difficulty: "easy" / "hard" / None(加载全部)
             use_adf: 是否构造 ADF 三通道特征
             local_mean_size: ADF 局部均值的窗口大小
+            per_sample_norm: 是否对每个样本的原始 drift 做 Min-Max 归一化
+                (消除不同数据集间的绝对尺度差异，如 px vs cm，映射到 [0,1])
         """
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -101,6 +104,7 @@ class FatigueDataset(Dataset):
         self.feature_name = feature_name
         self.use_adf = use_adf
         self.local_mean_size = local_mean_size
+        self.per_sample_norm = per_sample_norm
 
         self.windows = []       # (window_size,) 或 (window_size, 3) 的 np.float32
         self.labels = []        # 0=alert, 1=sleepy
@@ -155,6 +159,17 @@ class FatigueDataset(Dataset):
             num_frames = len(drift_values)
             if num_frames < self.window_size:
                 continue  # 帧数不足，跳过
+
+            # Per-sample Min-Max 归一化（消除跨数据集尺度差异，映射到 [0,1]）
+            if self.per_sample_norm:
+                drift_arr = np.asarray(drift_values, dtype=np.float32)
+                d_min = drift_arr.min()
+                d_max = drift_arr.max()
+                rng = d_max - d_min
+                if rng > 1e-8:
+                    drift_values = ((drift_arr - d_min) / rng).tolist()
+                else:
+                    drift_values = np.zeros_like(drift_arr).tolist()
 
             # 计算 ADF 三通道特征（在全序列上计算，保证局部均值/差分的时序上下文）
             if self.use_adf:
@@ -221,6 +236,7 @@ class FewShotFatigueDataset(Dataset):
         difficulty: Optional[str] = None,
         use_adf: bool = True,
         local_mean_size: int = 16,
+        per_sample_norm: bool = False,
     ):
         super().__init__()
         self.data_dir = Path(data_dir)
@@ -229,6 +245,7 @@ class FewShotFatigueDataset(Dataset):
         self.feature_name = feature_name
         self.use_adf = use_adf
         self.local_mean_size = local_mean_size
+        self.per_sample_norm = per_sample_norm
 
         # 按类别组织: {0: [(window, subject_id), ...], 1: [...]}
         self.class_to_samples: Dict[int, List[Dict]] = {0: [], 1: []}
@@ -285,6 +302,17 @@ class FewShotFatigueDataset(Dataset):
             num_frames = len(drift_values)
             if num_frames < self.window_size:
                 continue
+
+            # Per-sample Min-Max 归一化（消除跨数据集尺度差异，映射到 [0,1]）
+            if self.per_sample_norm:
+                drift_arr = np.asarray(drift_values, dtype=np.float32)
+                d_min = drift_arr.min()
+                d_max = drift_arr.max()
+                rng = d_max - d_min
+                if rng > 1e-8:
+                    drift_values = ((drift_arr - d_min) / rng).tolist()
+                else:
+                    drift_values = np.zeros_like(drift_arr).tolist()
 
             if self.use_adf:
                 sequence = compute_adf(drift_values, self.local_mean_size)  # (T, 3)

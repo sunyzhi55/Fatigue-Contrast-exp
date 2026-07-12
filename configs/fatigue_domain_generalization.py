@@ -22,6 +22,12 @@ AFM-CIR 说明:
 """
 
 
+DATA_DIR = "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate"
+BATCH_SIZE = 128
+EPOCHS = 200
+PATIENCE = 200
+VAL_STRATEGY = "loso"  # 验证策略：kfold 或 loso
+DIFFICULTY = "easy"  # 数据类别（easy / hard）
 fatigue_dg_experiments={
     # ====================================================================== #
     #              InterpretableCNN 域泛化基线 (DG, 纯 ERM)                    #
@@ -40,7 +46,7 @@ fatigue_dg_experiments={
 
         # ---- 数据 ----
         "dataset_name": "FatigueDetection",
-        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+        "data_dir": DATA_DIR,
 
         # 特征与窗口
         "feature_name": "deviation_px_before_calibrate",
@@ -50,7 +56,7 @@ fatigue_dg_experiments={
         "local_mean_size": 16,
 
         # ---- 数据划分 ----
-        "difficulty": "easy",
+        "difficulty": DIFFICULTY,
         "test_ids": None,
         "folds": {
             1: {"val_ids": ["01", "05", "14", "19"]},
@@ -67,11 +73,11 @@ fatigue_dg_experiments={
         "label_smoothing": 0.0,
         "optimizer_name": "AdamW",
 
-        "batch_size": 128,
-        "epochs": 1000,
-        "patience": 1000,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "patience": PATIENCE,
         "k_fold": 5,
-        "val_strategy": "kfold",
+        "val_strategy": VAL_STRATEGY,
 
         # ---- 超参数 ----
         "lr": 1e-3,
@@ -81,7 +87,7 @@ fatigue_dg_experiments={
         "niter": 50,
 
         # ---- 系统 ----
-        "device": "cuda:0",
+        "device": "cuda:1",
         "seed": 42,
         "output_dir": "./result",
 
@@ -108,7 +114,7 @@ fatigue_dg_experiments={
 
         # ---- 数据 ----
         "dataset_name": "FatigueDetection",
-        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+        "data_dir": DATA_DIR,
 
         # 特征与窗口
         "feature_name": "deviation_px_before_calibrate",
@@ -118,7 +124,7 @@ fatigue_dg_experiments={
         "local_mean_size": 16,
 
         # ---- 数据划分 ----
-        "difficulty": "easy",
+        "difficulty": DIFFICULTY,
         "test_ids": None,
         "folds": {
             1: {"val_ids": ["01", "05", "14", "19"]},
@@ -135,11 +141,11 @@ fatigue_dg_experiments={
         "label_smoothing": 0.0,
         "optimizer_name": "AdamW",
 
-        "batch_size": 128,
-        "epochs": 1000,
-        "patience": 1000,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "patience": PATIENCE,
         "k_fold": 5,
-        "val_strategy": "kfold",
+        "val_strategy": VAL_STRATEGY,
 
         # ---- 超参数 ----
         "lr": 1e-3,
@@ -167,7 +173,7 @@ fatigue_dg_experiments={
         "cir_adv_weight": 0.5,        # 对抗掩码损失权重
 
         # ---- 系统 ----
-        "device": "cuda:0",
+        "device": "cuda:7",
         "seed": 42,
         "output_dir": "./result",
 

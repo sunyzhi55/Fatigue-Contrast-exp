@@ -34,8 +34,20 @@
     python main_fatigue.py --exp_name Fatigue_LA_MSDA_baseline
     python main_fatigue.py --exp_name Fatigue_DANN_baseline
     python main_fatigue.py --exp_name Fatigue_DeepCORAL_baseline
+
+    
+/root/autodl-tmp/shenxy/Data/Process0620_calibrate
+/root/autodl-tmp/shenxy/Data/gaipat/final_relabelled
+
+/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate
 """
 
+DATA_DIR = "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate"
+BATCH_SIZE = 128
+EPOCHS = 200
+PATIENCE = 200
+DIFFICULTY = "easy"  # 数据类别（easy / hard）
+VAL_STRATEGY = "loso"  # 验证策略：kfold 或 loso
 fatigue_da_experiments = {
 
     # ====================================================================== #
@@ -54,7 +66,7 @@ fatigue_da_experiments = {
 
         # ---- 数据 ----
         "dataset_name": "FatigueDetection",
-        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+        "data_dir": DATA_DIR,
 
         # 特征与窗口
         "feature_name": "deviation_px_before_calibrate",
@@ -65,7 +77,7 @@ fatigue_da_experiments = {
         "local_mean_size": 16,
 
         # ---- 数据划分 ----
-        "difficulty": "easy",       # 数据类别（easy / hard）
+        "difficulty": DIFFICULTY,       # 数据类别（easy / hard）
         "test_ids": None,           # 测试集受试者ID（None 表示无独立测试集）
         # K-Fold 配置（LOSO 时由脚本自动生成）
         # 每个 fold 指定 val_ids（验证集受试者ID），剩余为训练集
@@ -84,11 +96,11 @@ fatigue_da_experiments = {
         "label_smoothing": 0.0,
         "optimizer_name": "SGD",
 
-        "batch_size": 64,
-        "epochs": 1000,
-        "patience": 1000,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "patience": PATIENCE,
         "k_fold": 5,               # fold 数量（与 folds 字典一致）
-        "val_strategy": "kfold",   # 验证策略：kfold 或 loso
+        "val_strategy": VAL_STRATEGY,   # 验证策略：kfold 或 loso
 
         # ---- 超参数 ----
         "lr": 5e-3,
@@ -137,7 +149,7 @@ fatigue_da_experiments = {
 
         # ---- 数据 ----
         "dataset_name": "FatigueDetection",
-        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+        "data_dir": DATA_DIR,
 
         # 特征与窗口
         "feature_name": "deviation_px_before_calibrate",
@@ -147,7 +159,7 @@ fatigue_da_experiments = {
         "local_mean_size": 16,
 
         # ---- 数据划分 ----
-        "difficulty": "easy",
+        "difficulty": DIFFICULTY,
         "test_ids": None,
         "folds": {
             1: {"val_ids": ["01", "05", "14", "19"]},
@@ -164,11 +176,11 @@ fatigue_da_experiments = {
         "label_smoothing": 0.0,
         "optimizer_name": "AdamW",
 
-        "batch_size": 64,
-        "epochs": 1000,
-        "patience": 1000,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "patience": PATIENCE,
         "k_fold": 5,
-        "val_strategy": "kfold",
+        "val_strategy": VAL_STRATEGY,
 
         # ---- 超参数 ----
         "lr": 1e-3,
@@ -181,7 +193,7 @@ fatigue_da_experiments = {
         "mmd_weight": 1.0,           # MMD 损失权重 (论文 Eq.8: L = L_cls + L_mmd)
 
         # ---- 系统 ----
-        "device": "cuda:0",
+        "device": "cuda:1",
         "seed": 42,
         "output_dir": "./result",
 
@@ -207,7 +219,7 @@ fatigue_da_experiments = {
 
         # ---- 数据 ----
         "dataset_name": "FatigueDetection",
-        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+        "data_dir": DATA_DIR,
 
         # 特征与窗口
         "feature_name": "deviation_px_before_calibrate",
@@ -217,7 +229,7 @@ fatigue_da_experiments = {
         "local_mean_size": 16,
 
         # ---- 数据划分 ----
-        "difficulty": "easy",
+        "difficulty": DIFFICULTY,
         "test_ids": None,
         "folds": {
             1: {"val_ids": ["01", "05", "14", "19"]},
@@ -234,11 +246,11 @@ fatigue_da_experiments = {
         "label_smoothing": 0.0,
         "optimizer_name": "SGD",
 
-        "batch_size": 128,
-        "epochs": 1000,
-        "patience": 1000,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "patience": PATIENCE,
         "k_fold": 5,
-        "val_strategy": "kfold",
+        "val_strategy": VAL_STRATEGY,
 
         # ---- 超参数 ----
         "lr": 1e-3,
@@ -251,7 +263,7 @@ fatigue_da_experiments = {
         "da_warmup_scale": 10.0,      # sigmoid 预热陡峭度 (原论文=10)
 
         # ---- 系统 ----
-        "device": "cuda:0",
+        "device": "cuda:2",
         "seed": 42,
         "output_dir": "./result",
 
@@ -277,7 +289,7 @@ fatigue_da_experiments = {
 
         # ---- 数据 ----
         "dataset_name": "FatigueDetection",
-        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+        "data_dir": DATA_DIR,
 
         # 特征与窗口
         "feature_name": "deviation_px_before_calibrate",
@@ -287,7 +299,7 @@ fatigue_da_experiments = {
         "local_mean_size": 16,
 
         # ---- 数据划分 ----
-        "difficulty": "easy",
+        "difficulty": DIFFICULTY,
         "test_ids": None,
         "folds": {
             1: {"val_ids": ["01", "05", "14", "19"]},
@@ -304,11 +316,11 @@ fatigue_da_experiments = {
         "label_smoothing": 0.0,
         "optimizer_name": "SGD",
 
-        "batch_size": 128,
-        "epochs": 1000,
-        "patience": 1000,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "patience": PATIENCE,
         "k_fold": 5,
-        "val_strategy": "kfold",
+        "val_strategy": VAL_STRATEGY,
 
         # ---- 超参数 ----
         "lr": 5e-3,
@@ -321,7 +333,7 @@ fatigue_da_experiments = {
         "dann_gamma": 10.0,          # GRL sigmoid 调度陡峭度 (论文 Eq.9: γ=10)
 
         # ---- 系统 ----
-        "device": "cuda:0",
+        "device": "cuda:3",
         "seed": 42,
         "output_dir": "./result",
 
@@ -346,7 +358,7 @@ fatigue_da_experiments = {
 
         # ---- 数据 ----
         "dataset_name": "FatigueDetection",
-        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+        "data_dir": DATA_DIR,
 
         # 特征与窗口
         "feature_name": "deviation_px_before_calibrate",
@@ -356,7 +368,7 @@ fatigue_da_experiments = {
         "local_mean_size": 16,
 
         # ---- 数据划分 ----
-        "difficulty": "easy",
+        "difficulty": DIFFICULTY,
         "test_ids": None,
         "folds": {
             1: {"val_ids": ["01", "05", "14", "19"]},
@@ -373,11 +385,11 @@ fatigue_da_experiments = {
         "label_smoothing": 0.0,
         "optimizer_name": "SGD",
 
-        "batch_size": 128,
-        "epochs": 1000,
-        "patience": 1000,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "patience": PATIENCE,
         "k_fold": 5,
-        "val_strategy": "kfold",
+        "val_strategy": VAL_STRATEGY,
 
         # ---- 超参数 ----
         "lr": 5e-3,
@@ -390,7 +402,7 @@ fatigue_da_experiments = {
         "coral_weight": 1.0,         # CORAL 损失权重 (论文 Eq.2: λ)
 
         # ---- 系统 ----
-        "device": "cuda:0",
+        "device": "cuda:6",
         "seed": 42,
         "output_dir": "./result",
 

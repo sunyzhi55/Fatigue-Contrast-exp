@@ -16,6 +16,12 @@
     - feature_name: 使用的特征字段
 """
 
+DATA_DIR = "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate"
+BATCH_SIZE = 128
+EPOCHS = 200
+PATIENCE = 200
+VAL_STRATEGY = "loso"  # 验证策略：kfold 或 loso
+DIFFICULTY = "easy"  # 数据类别（easy / hard）
 fatigue_temporal_experiments = {
 
     # ====================================================================== #
@@ -35,7 +41,7 @@ fatigue_temporal_experiments = {
 
         # ---- 数据 ----
         "dataset_name": "FatigueDetection",
-        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+        "data_dir": DATA_DIR,
 
         # 特征与窗口
         "feature_name": "deviation_px_before_calibrate",
@@ -46,7 +52,7 @@ fatigue_temporal_experiments = {
         "local_mean_size": 16,
 
         # ---- 数据划分 ----
-        "difficulty": "easy",  # 数据类别（easy / hard）
+        "difficulty": DIFFICULTY,  # 数据类别（easy / hard）
         # 测试集受试者ID（None 表示无独立测试集）
         "test_ids": None,
         # K-Fold 配置（LOSO 时由脚本自动生成）
@@ -65,11 +71,11 @@ fatigue_temporal_experiments = {
         "label_smoothing": 0.1,
         "optimizer_name": "AdamW",
 
-        "batch_size": 128,
-        "epochs": 1000,
-        "patience": 1000,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "patience": PATIENCE,
         "k_fold": 5,        # fold 数量（与 folds 字典一致）
-        "val_strategy": "kfold",  # 验证策略：kfold 或 loso
+        "val_strategy": VAL_STRATEGY,  # 验证策略：kfold 或 loso
 
         # ---- 超参数 ----
         "lr": 1e-3,
@@ -108,7 +114,7 @@ fatigue_temporal_experiments = {
 
         # ---- 数据 ----
         "dataset_name": "FatigueDetection",
-        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+        "data_dir": DATA_DIR,
 
         # 特征与窗口
         "feature_name": "deviation_px_before_calibrate",
@@ -119,7 +125,7 @@ fatigue_temporal_experiments = {
         "local_mean_size": 16,
 
         # ---- 数据划分 ----
-        "difficulty": "easy",  # 数据类别（easy / hard）
+        "difficulty": DIFFICULTY,  # 数据类别（easy / hard）
         "test_ids": None,
         "folds": {
             1: {"val_ids": ["01", "05", "14", "19"]},
@@ -135,11 +141,11 @@ fatigue_temporal_experiments = {
         "label_smoothing": 0.1,
         "optimizer_name": "AdamW",
 
-        "batch_size": 128,
-        "epochs": 1000,
-        "patience": 1000,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "patience": PATIENCE,
         "k_fold": 5,        # fold 数量（与 folds 字典一致）
-        "val_strategy": "kfold",  # 验证策略：kfold 或 loso
+        "val_strategy": VAL_STRATEGY,  # 验证策略：kfold 或 loso
 
         # ---- 超参数 ----
         "lr": 1e-3,
@@ -149,7 +155,7 @@ fatigue_temporal_experiments = {
         "niter": 50,
 
         # ---- 系统 ----
-        "device": "cuda:0",
+        "device": "cuda:1",
         "seed": 42,
         "output_dir": "./result",
 
@@ -178,7 +184,7 @@ fatigue_temporal_experiments = {
 
         # ---- 数据 ----
         "dataset_name": "FatigueDetection",
-        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+        "data_dir": DATA_DIR,
 
         # 特征与窗口
         "feature_name": "deviation_px_before_calibrate",
@@ -189,7 +195,7 @@ fatigue_temporal_experiments = {
         "local_mean_size": 16,
 
         # ---- 数据划分 ----
-        "difficulty": "easy",  # 数据类别（easy / hard）
+        "difficulty": DIFFICULTY,  # 数据类别（easy / hard）
         "test_ids": None,
         "folds": {
             1: {"val_ids": ["01", "05", "14", "19"]},
@@ -205,11 +211,11 @@ fatigue_temporal_experiments = {
         "label_smoothing": 0.1,
         "optimizer_name": "AdamW",
 
-        "batch_size": 128,
-        "epochs": 1000,
-        "patience": 1000,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "patience": PATIENCE,
         "k_fold": 5,        # fold 数量（与 folds 字典一致）
-        "val_strategy": "kfold",  # 验证策略：kfold 或 loso
+        "val_strategy": VAL_STRATEGY,  # 验证策略：kfold 或 loso
         # ---- 超参数 ----
         "lr": 1e-3,
         "weight_decay": 1e-2,
@@ -247,7 +253,7 @@ fatigue_temporal_experiments = {
 
         # ---- 数据 ----
         "dataset_name": "FatigueDetection",
-        "data_dir": "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate",
+        "data_dir": DATA_DIR,
 
         # 特征与窗口
         "feature_name": "deviation_px_before_calibrate",
@@ -257,7 +263,7 @@ fatigue_temporal_experiments = {
         "local_mean_size": 16,
 
         # ---- 数据划分 ----
-        "difficulty": "easy",
+        "difficulty": DIFFICULTY,
         "test_ids": None,
         "folds": {
             1: {"val_ids": ["01", "05", "14", "19"]},
@@ -273,11 +279,11 @@ fatigue_temporal_experiments = {
         "label_smoothing": 0.0,
         "optimizer_name": "AdamW",
 
-        "batch_size": 128,
-        "epochs": 1000,
-        "patience": 1000,
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "patience": PATIENCE,
         "k_fold": 5,        # fold 数量, 与下方 folds 字典一致
-        "val_strategy": "kfold",  # 验证策略: kfold 或 loso
+        "val_strategy": VAL_STRATEGY,  # 验证策略: kfold 或 loso
 
         # ---- 超参数 ----
         "lr": 1e-3,
@@ -287,7 +293,7 @@ fatigue_temporal_experiments = {
         "niter": 50,
 
         # ---- 系统 ----
-        "device": "cuda:0",
+        "device": "cuda:6",
         "seed": 42,
         "output_dir": "./result",
 

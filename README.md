@@ -15,7 +15,7 @@
 
 ## 📖 项目简介
 
-本项目是**跨对象（Cross-Subject）疲劳检测**的对比实验框架，基于 PyTorch 构建。实现了多种经典基线方法，用于与本文提出的 SelfNet 方法进行性能对比。
+本项目是**跨对象（Cross-Subject）疲劳检测**的对比实验框架，基于 PyTorch 构建。实现了多种经典基线方法，支持 FatigueGuard 和 GAIPAT 两个数据集上的同数据集评估及跨数据集泛化测试，用于与本文提出的 SelfNet 方法进行性能对比。
 
 ### 支持的基线方法
 
@@ -50,7 +50,8 @@ Fatigue-Contrast-exp/
 │   └── fatigue_domain_generalization.py  # 域泛化基线配置 (InterpretableCNN/AFM-CIR)
 ├── data/
 │   ├── dataset.py                        # 原始图像数据集
-│   └── fatigue_dataset.py                # 疲劳检测数据集 (JSONL 滑动窗口)
+│   ├── fatigue_dataset.py                # 疲劳检测数据集 (JSONL 滑动窗口)
+│   └── gaipat_dataset.py                 # GAIPAT 公开数据集 (跨数据集评估)
 ├── models/
 │   ├── get_model.py                      # 模型工厂（统一入口）
 │   ├── lstm.py                           # LSTM 分类器
@@ -98,6 +99,9 @@ Fatigue-Contrast-exp/
 │   └── test_interpcnn.py                 # InterpretableCNN 单元测试
 ├── main_fatigue.py                       # 疲劳检测训练入口 ⭐
 ├── main.py                               # 原始模板训练入口
+├── stats_model_flops.py                  # 模型参数量/FLOPs 统计
+├── DataFormat.md                         # 数据格式详细说明
+├── model_stats.csv                       # 模型统计结果 (自动生成)
 ├── requirements.txt                      # 依赖清单
 └── README.md                             # 本文档
 ```
@@ -182,6 +186,22 @@ data_dir/
 └── ...
 ```
 
+### ADF 三通道特征
+
+原始 drift 序列（`deviation_px_before_calibrate`）经 ADF 特征变换后生成三通道输入：
+
+| 通道 | 名称 | 计算方式 | 作用 |
+|:---:|:---:|:---|:---|
+| 0 | Drift | 原始漂移值 | 空间偏移幅度 |
+| 1 | Diff | `np.diff(drift, prepend=drift[:1])` | 一阶时序变化率 |
+| 2 | Local Mean | 滑动窗口均值 (`local_mean_size=16`) | 低频趋势 |
+
+每个窗口形状为 `(window_size, 3)`，小样本模型展平为 `(window_size*3,)`。可通过 `"use_adf": False` 回退为单通道模式。
+
+### GAIPAT 公开数据集
+
+GAIPAT 数据集的详细格式和跨数据集实验方法见下方 [GAIPAT 数据集与跨数据集实验](#-gaipat-数据集与跨数据集实验) 章节。
+
 ---
 
 ## 🚀 快速开始
@@ -221,6 +241,28 @@ data_dir/
 
 ### 2️⃣ 训练
 
+每个模型需要完成 **4 种实验设置**：KFold+Easy、KFold+Hard、LOSO+Easy、LOSO+Hard。通过修改配置中的 `val_strategy` 和 `difficulty` 切换：
+
+```bash
+# ---- KFold + Easy (默认配置) ----
+# configs 中: "val_strategy": "kfold", "difficulty": "easy"
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline
+
+# ---- KFold + Hard ----
+# 修改 configs 中: "difficulty": "hard"
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline
+
+# ---- LOSO + Easy ----
+# 修改 configs 中: "val_strategy": "loso", "difficulty": "easy"
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline
+
+# ---- LOSO + Hard ----
+# 修改 configs 中: "val_strategy": "loso", "difficulty": "hard"
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline
+```
+
+**全部模型训练命令**（以 KFold+Easy 为例）：
+
 ```bash
 # ---- 时序基线 ----
 python main_fatigue.py --exp_name Fatigue_LSTM_baseline
@@ -253,16 +295,18 @@ result_20260630_143000_Fatigue_LSTM_baseline/
 ├── config.yaml                    # 当前实验的完整配置（自动保存）
 ├── best_model_fold1.pth           # Fold 1 最佳模型
 ├── best_model_fold2.pth           # Fold 2 最佳模型
-├── best_model_fold3.pth           # Fold 3 最佳模型
+├── ...                            # 更多 fold 模型
 ├── best_results.csv               # ⭐ 各 fold 最佳轮 train+val 指标（含 mean/std）
 ├── history_fold01.csv             # ⭐ Fold 1 每轮 train/val/test 指标（实时追加）
 ├── history_fold02.csv             # ⭐ Fold 2 每轮 train/val/test 指标（实时追加）
-├── history_fold03.csv             # ⭐ Fold 3 每轮 train/val/test 指标（实时追加）
+├── ...                            # 更多 fold 历史
+├── fg_to_gaipat_results.csv       # [跨数据集] FG→GAIPAT 测试结果
+├── gaipat_to_fg_results.csv       # [跨数据集] GAIPAT→FG 测试结果
 ├── summary/                       # TensorBoard 日志
 └── log.txt                        # 训练日志
 ```
 
-如果配置了 `test_ids`，训练完成后会自动加载每个 fold 的模型进行批量测试评估，并输出汇总结果。
+如果配置了 `test_ids`，训练完成后会自动加载每个 fold 的模型进行批量测试评估。跨数据集评估（`--eval_mode`）会额外生成独立的结果 CSV。
 
 #### 📄 指标 CSV 文件说明
 
@@ -270,6 +314,138 @@ result_20260630_143000_Fatigue_LSTM_baseline/
 |:---|:---|
 | `history_fold{N}.csv` | 每个 fold / LOSO **单独一个文件**，**每训练一轮实时追加** train + val 指标到文件末尾。长表格式，`split` 列区分 `train` / `val` / `test`，`is_best` 列标记该轮是否为当前 fold 的最佳轮；混淆矩阵展平为 `cm_00 / cm_01 / cm_10 / cm_11` 四个独立列。即使训练中途中断，已完成的轮次指标也不会丢失。 |
 | `best_results.csv` | 每个 fold / LOSO **最佳轮**的训练集 + 验证集全部指标（宽表，`train_*` / `val_*` 并排），每折完成时实时追加一行；全部 fold 结束后追加 `mean` / `std` 汇总行。 |
+| `*_results.csv` | 跨数据集评估结果（如 `fg_to_gaipat_results.csv`），每个 fold 一行指标 + `mean` / `std` 汇总行。 |
+
+---
+
+## 🌐 GAIPAT 数据集与跨数据集实验
+
+### GAIPAT 数据集简介
+
+GAIPAT 是一个公开的注视行为数据集，用于评估模型在不同数据分布下的泛化能力。
+
+**目录结构：**
+```
+gaipat_dir/
+├── release/
+│   ├── 5530740_house_4_release_21_0.jsonl    # subject_task_step_event_block_label
+│   ├── 5530740_house_4_release_22_1.jsonl
+│   └── ...
+└── grasp/
+    ├── 5530741_ball_2_grasp_10_0.jsonl
+    └── ...
+```
+
+**文件名格式：** `{subject_id}_{task}_{step}_{event}_{block_id}_{label}.jsonl`
+
+**标签规则：**
+| label | 含义 | 用途 |
+|:---:|:---:|:---:|
+| 0 | 分心 (distracted) | 对应 FatigueGuard 的 alert |
+| 1 | 专注 (focused) | 对应 FatigueGuard 的 sleepy |
+| 2, 3 | 其他状态 | 自动丢弃 |
+
+**关键特征：** `deviation_cm`（注视偏差距离，厘米），每条数据 256 帧，与 `window_size=256` 配置匹配。`GaipatDataset` 默认开启 `per_sample_norm=True`（Min-Max 归一化到 [0,1]），以消除与 FatigueGuard 像素值之间的尺度差异。
+
+### 四种评估模式
+
+通过 `--eval_mode` 参数控制：
+
+| 模式 | 训练数据 | 测试数据 | 说明 |
+|:---:|:---:|:---:|:---|
+| `fatigue` | FatigueGuard | FatigueGuard | 默认模式，同数据集训练+测试 |
+| `fatigue_to_gaipat` | FatigueGuard | GAIPAT | FG 训练的模型在 GAIPAT 上测试泛化能力 |
+| `gaipat` | GAIPAT | GAIPAT | GAIPAT 数据集内部训练+测试 |
+| `gaipat_to_fatigue` | GAIPAT | FatigueGuard | GAIPAT 训练的模型在 FG 上测试泛化能力 |
+
+### 运行示例
+
+```bash
+# ---- 模式 1: FatigueGuard 训练 + FatigueGuard 测试 (默认) ----
+# 同数据集实验，无需 per_sample_norm（但如果后续要做跨数据集，建议开启）
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline
+# 如需后续跨数据集测试，训练时加 --per_sample_norm:
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline --per_sample_norm
+
+# ---- 模式 2: FatigueGuard 训练 + GAIPAT 测试 ----
+# 加载模式1训练好的权重，在 GAIPAT 上测试（必须使用 --per_sample_norm 训练的模型）
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline \
+    --eval_mode fatigue_to_gaipat \
+    --gaipat_dir /root/autodl-tmp/shenxy/Data/gaipat/final_relabelled \
+    --checkpoint_dir ./result_20250101_120000_Fatigue_LSTM_baseline \
+    --per_sample_norm
+
+# ---- 模式 3: GAIPAT 训练 + GAIPAT 测试 ----
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline \
+    --eval_mode gaipat \
+    --gaipat_dir /root/autodl-tmp/shenxy/Data/gaipat/final_relabelled \
+    --per_sample_norm
+
+# ---- 模式 4: GAIPAT 训练 + FatigueGuard 测试 ----
+# 加载模式3训练好的权重，在 FG 上测试
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline \
+    --eval_mode gaipat_to_fatigue \
+    --gaipat_dir /root/autodl-tmp/shenxy/Data/gaipat/final_relabelled \
+    --checkpoint_dir ./result_gaipat_20250101_120000_Fatigue_LSTM_baseline_gaipat \
+    --per_sample_norm
+```
+
+### CLI 参数说明
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---:|
+| `--eval_mode` | 评估模式: `fatigue` / `fatigue_to_gaipat` / `gaipat` / `gaipat_to_fatigue` | `fatigue` |
+| `--gaipat_dir` | GAIPAT 数据根目录 (含 `release/` 和 `grasp/` 子目录) | `None` |
+| `--checkpoint_dir` | 跨数据集测试时加载的模型权重目录 | `None` (使用当前输出目录) |
+| `--gaipat_k_fold` | GAIPAT K-Fold 折数 | `5` |
+| `--per_sample_norm` | 启用 per-sample Min-Max 归一化（跨数据集实验必须开启） | `False` |
+
+> **关于 per_sample_norm**：FatigueGuard 使用 `deviation_px`（像素），GAIPAT 使用 `deviation_cm`（厘米），数值尺度差异巨大。开启 `--per_sample_norm` 会对每个样本的原始 drift 序列做 Min-Max 归一化（`(x - min) / (max - min)`，映射到 [0, 1]），消除绝对尺度差异且不产生负数。**跨数据集实验的训练和测试阶段都必须开启此选项**。也可以在配置文件中设置 `"per_sample_norm": True`。
+
+### GAIPAT 数据划分
+
+GAIPAT 数据支持两种划分策略（与 FatigueGuard 一致）：
+
+- **K-Fold**：自动按受试者分组进行 K 折交叉验证（默认 5 折），可通过 `--gaipat_k_fold` 调整
+- **LOSO**：留一受试者验证（Leave-One-Subject-Out），由配置中的 `val_strategy` 控制
+
+### 跨数据集输出
+
+跨数据集评估结果保存为独立 CSV 文件：
+
+```
+result_xxx/
+├── best_results.csv           # 同数据集训练+测试结果
+├── history_fold*.csv          # 训练过程指标历史
+├── fg_to_gaipat_results.csv   # FG->GAIPAT 跨数据集测试结果
+├── gaipat_to_fg_results.csv   # GAIPAT->FG 跨数据集测试结果
+└── gaipat_test_results.csv    # GAIPAT 内部测试结果
+```
+
+### 所有模型的跨数据集实验
+
+对每个模型运行全部 4 种模式（以 LSTM + KFold + Easy 为例）：
+
+```bash
+GAIPAT_DIR=/root/autodl-tmp/shenxy/Data/gaipat/final_relabelled
+
+# 模式 1 + 2 (FG 训练 -> FG 测试 + GAIPAT 测试)
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline --per_sample_norm
+FG_CKPT=./result_XXX_Fatigue_LSTM_baseline  # 替换为实际目录
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline \
+    --eval_mode fatigue_to_gaipat --gaipat_dir $GAIPAT_DIR \
+    --checkpoint_dir $FG_CKPT --per_sample_norm
+
+# 模式 3 + 4 (GAIPAT 训练 -> GAIPAT 测试 + FG 测试)
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline \
+    --eval_mode gaipat --gaipat_dir $GAIPAT_DIR --per_sample_norm
+GAIPAT_CKPT=./result_XXX_Fatigue_LSTM_baseline_gaipat  # 替换为实际目录
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline \
+    --eval_mode gaipat_to_fatigue --gaipat_dir $GAIPAT_DIR \
+    --checkpoint_dir $GAIPAT_CKPT --per_sample_norm
+```
+
+对 LOSO 和 Hard 难度，修改配置中的 `val_strategy` 和 `difficulty` 即可。
 
 ---
 
@@ -288,6 +464,7 @@ result_20260630_143000_Fatigue_LSTM_baseline/
 | `window_size` | 滑动窗口大小（帧数） | 256 |
 | `stride` | 滑动窗口步长 | 64 |
 | `use_adf` | 是否使用 ADF 三通道特征 | `True` |
+| `per_sample_norm` | 是否对每个样本做 Min-Max 归一化 (跨数据集实验必须开启) | `False` |
 | `batch_size` | 批大小 | 128 |
 | `epochs` | 最大训练轮数 | 1000 |
 | `patience` | 早停耐心值 | 1000 |
@@ -306,7 +483,7 @@ result_20260630_143000_Fatigue_LSTM_baseline/
 | `nhead` | Transformer 注意力头数 | 4 |
 | `d_state` | Mamba SSM 状态维度 | 16 |
 
-### 时序基线特有参数 (TimesNet)
+### TimesNet 特有参数
 
 | 参数 | 说明 | 默认值 |
 |:---|:---|:---:|
@@ -891,7 +1068,7 @@ L = L_sup + L_aug + τ·L_FAC + w·L_inf
 
 | training_type | 训练函数 | 适用方法 |
 |:---|:---|:---|
-| _(默认)_ | `run_temporal_fold()` | LSTM, Transformer, Mamba |
+| _(默认)_ | `run_temporal_fold()` | LSTM, Transformer, Mamba, TimesNet |
 | _(fewshot)_ | `run_fewshot_fold()` | ProtoNet, RelationNet |
 | `domain_adapt` | `run_mlda_fold()` | MLDA |
 | `domain_adapt_vit` | `run_daeevit_fold()` | DAEEGViT |
@@ -905,9 +1082,20 @@ L = L_sup + L_aug + τ·L_FAC + w·L_inf
 
 ### 自定义数据
 
-如果数据格式不同，修改 `data/fatigue_dataset.py` 中的：
-- `_load_data()`: 数据加载逻辑
-- `__getitem__()`: 返回格式
+项目支持两种数据集格式：
+
+**FatigueGuard 格式** (`data/fatigue_dataset.py`)：
+- 文件名: `[id]_[easy|hard]_[alert|sleepy].jsonl`
+- 特征: `deviation_px_before_calibrate`
+- 数据平铺在单一目录下
+
+**GAIPAT 格式** (`data/gaipat_dataset.py`)：
+- 文件名: `[subject]_[task]_[step]_[event]_[block]_[label].jsonl`
+- 特征: `deviation_cm`
+- 数据按 `release/` 和 `grasp/` 子目录组织
+- 标签 0=分心, 1=专注, 其他自动丢弃
+
+添加新数据集时，参考以上两种格式之一编写 Dataset 类，并在 `main_fatigue.py` 的 `build_fold_data()` 和 `evaluate_on_dataset()` 中注册路由。跨数据集评估需要开启 `--per_sample_norm` 消除尺度差异。
 
 ---
 
@@ -947,6 +1135,7 @@ python -m pytest tests/test_interpcnn.py::TestArchitecture -v
 - **DeepCORAL**: Sun & Saenko. *Deep CORAL: Correlation Alignment for Deep Domain Adaptation*. ECCV, 2016.
 - **InterpretableCNN**: Cui et al. *EEG-Based Cross-Subject Driver Drowsiness Recognition With an Interpretable Convolutional Neural Network*. IEEE TNNLS, 2022.
 - **AFM-CIR**: Zhu et al. *Causality-Preserving Domain Generalization via Adaptive Fourier Mixup for RUL Prediction*. IEEE TPAMI, 2026. DOI: 10.1109/TPAMI.2026.3688520.
+- **GAIPAT**: *GAIPAT: Gaze-based Attention and Intention Prediction for Autonomous Driving*.
 
 ---
 
