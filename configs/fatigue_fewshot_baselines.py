@@ -17,7 +17,7 @@ DATA_DIR = "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreproces
 BATCH_SIZE = 128
 EPOCHS = 200
 PATIENCE = 200
-VAL_STRATEGY = "loso"  # 验证策略：kfold 或 loso
+VAL_STRATEGY = "kfold"  # 验证策略：kfold 或 loso
 DIFFICULTY = "easy"  # 数据类别（easy / hard）
 fatigue_fewshot_experiments = {
 
@@ -155,7 +155,7 @@ fatigue_fewshot_experiments = {
         "niter": 50,
 
         # ---- 系统 ----
-        "device": "cuda:1",
+        "device": "cuda:0",
         "seed": 42,
         "output_dir": "./result",
 

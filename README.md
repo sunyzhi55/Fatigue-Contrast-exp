@@ -25,6 +25,7 @@
 | | Transformer | 基于自注意力的时序编码器 |
 | | Mamba | 基于选择性状态空间模型（S4/S6），线性复杂度的时序建模 |
 | | TimesNet | 时序 2D 变化建模，FFT 多周期发现 + Inception 2D 卷积，ICLR 2023 |
+| | STAFNet | 双分支频谱-时序注意力融合网络，FFT 频带卷积 + SE 注意力 + 多尺度 CNN + Bi-GRU + 时序注意力，IEEE TIM 2026 |
 | **小样本学习** | ProtoNet | 原型网络，基于欧氏距离的度量学习 |
 | | RelationNet | 关系网络，基于可学习关系模块的度量学习 |
 | **域适应** | MLDA | 多级域适应，Wasserstein 域间对齐 + ICD 类条件对比 |
@@ -44,7 +45,7 @@ Fatigue-Contrast-exp/
 ├── configs/
 │   ├── config.py                         # 原始模板配置
 │   ├── experiments_object.py             # 原始模板实验字典
-│   ├── fatigue_temporal_baselines.py     # 时序基线配置 (LSTM/Transformer/Mamba)
+│   ├── fatigue_temporal_baselines.py     # 时序基线配置 (LSTM/Transformer/Mamba/TimesNet/STAFNet)
 │   ├── fatigue_fewshot_baselines.py      # 小样本基线配置 (ProtoNet/RelationNet)
 │   ├── fatigue_domain_adapt_baselines.py # 域适应基线配置 (MLDA/DAEEGViT/LA-MSDA/DANN/DeepCORAL)
 │   └── fatigue_domain_generalization.py  # 域泛化基线配置 (InterpretableCNN/AFM-CIR)
@@ -58,6 +59,7 @@ Fatigue-Contrast-exp/
 │   ├── transformer_encoder.py            # Transformer Encoder 分类器
 │   ├── mamba_model.py                    # Mamba 分类器 (基于 mamba-ssm)
 │   ├── timesnet_model.py                 # TimesNet 分类器 (FFT 周期发现 + 2D Inception)
+│   ├── stafnet_model.py                  # STAFNet 分类器 (双分支频谱-时序注意力融合, IEEE TIM 2026)
 │   ├── protonet.py                       # Prototypical Networks
 │   ├── relationnet.py                    # Relation Network
 │   ├── mlda_model.py                     # MLDA 域适应模型 (Encoder+Classifier+U/V)
@@ -269,6 +271,7 @@ python main_fatigue.py --exp_name Fatigue_LSTM_baseline
 python main_fatigue.py --exp_name Fatigue_Transformer_baseline
 python main_fatigue.py --exp_name Fatigue_Mamba_baseline
 python main_fatigue.py --exp_name Fatigue_TimesNet_baseline
+python main_fatigue.py --exp_name Fatigue_STAFNet_baseline
 
 # ---- 小样本基线 ----
 python main_fatigue.py --exp_name Fatigue_ProtoNet_baseline
@@ -383,11 +386,8 @@ python main_fatigue.py --exp_name Fatigue_LSTM_baseline \
 
 # ---- 模式 4: GAIPAT 训练 + FatigueGuard 测试 ----
 # 加载模式3训练好的权重，在 FG 上测试
-python main_fatigue.py --exp_name Fatigue_LSTM_baseline \
-    --eval_mode gaipat_to_fatigue \
-    --gaipat_dir /root/autodl-tmp/shenxy/Data/gaipat/final_relabelled \
-    --checkpoint_dir ./result_gaipat_20250101_120000_Fatigue_LSTM_baseline_gaipat \
-    --per_sample_norm
+python main_fatigue.py --exp_name Fatigue_LSTM_baseline --eval_mode gaipat_to_fatigue --gaipat_dir /root/autodl-tmp/shenxy/Data/gaipat/final_relabelled --checkpoint_dir ./result_gaipat_20250101_120000_Fatigue_LSTM_baseline_gaipat --per_sample_norm
+
 ```
 
 ### CLI 参数说明
@@ -493,6 +493,19 @@ python main_fatigue.py --exp_name Fatigue_LSTM_baseline \
 | `top_k` | FFT top-k 周期数 (论文分类默认 3) | 3 |
 | `e_layers` | TimesBlock 层数 (论文分类默认 2) | 2 |
 | `dropout` | Dropout 率 | 0.1 |
+
+### STAFNet 特有参数 (IEEE TIM 2026)
+
+| 参数 | 说明 | 默认值 |
+|:---|:---|:---:|
+| `spectral_channels` | 每个频带的输出通道数 C' | 8 |
+| `num_bands` | 频带数量 K (delta, theta, alpha, beta, gamma) | 5 |
+| `se_reduction` | SE 通道注意力压缩比 r | 4 |
+| `temporal_channels` | 多尺度卷积输出通道数 C' | 16 |
+| `gru_hidden` | Bi-GRU 单向隐藏层大小 H | 64 |
+| `gru_layers` | GRU 层数 | 1 |
+| `branch_output_dim` | 分支 FC 输出维度 d | 2 |
+| `dropout` | FC 层 Dropout 率 | 0.1 |
 
 ### 小样本基线特有参数 (ProtoNet / RelationNet)
 
@@ -699,6 +712,65 @@ x (B, C, H, W) → [Conv2d(k=1,3,5,7,9,11)] → Stack → Mean → (B, C', H, W)
 - 共享 2D 卷积: 同一 Inception 块应用于所有 k 个周期 (参数高效)
 - 自适应聚合: FFT 振幅经 Softmax 作为权重, 加权合并多周期结果
 - 分类头: GlobalAvgPool + FC (比原论文 Flatten+FC 更轻量)
+
+### STAFNet (Spectral-Temporal Attention Fusion Network)
+
+STAFNet 是一种双分支频谱-时序注意力融合网络，原论文面向 EEG 疲劳检测。本实现将 EEG 多通道输入适配为 ADF 三通道时序信号输入，保留完整的频谱分支和时序分支架构。
+
+```
+Input (B, W, C)
+    |
+    +---> Spectral Branch -> o_f (B, d)
+    |         FFT -> Band Conv x K -> AvgPool -> Concat -> SE Attention -> FC
+    |
+    +---> Temporal Branch -> o_t (B, d)
+    |         Multiscale CNN(k=3,5,7) -> 1x1 Fuse -> Bi-GRU -> Temporal Attention -> FC
+    |
+    +---> Fusion: Concat(o_f, o_t) -> FC -> Logits (B, num_classes)
+```
+
+**Spectral Branch** (频谱分支, paper Eq. 1-8):
+```
+x (B, W, C)
+  -> Transpose -> (B, C, W)
+  -> rFFT -> |amplitude| -> (B, C, W//2+1)
+  -> 分 K 个频带 (delta/theta/alpha/beta/gamma)
+  -> 对每个频带 k:
+      Conv1d(C -> C', k=3) -> BN -> ReLU -> (B, C', L_band)
+      AdaptiveAvgPool1d -> (B, C', 1)
+  -> Concat 所有频带 -> (B, K*C', 1)
+  -> SE Attention: GAP -> FC -> ReLU -> FC -> Sigmoid -> channel-wise scale
+  -> Squeeze -> Flatten -> FC(K*C' -> d) -> o_f (B, d)
+```
+
+**Temporal Branch** (时序分支, paper Eq. 9-14):
+```
+x (B, W, C)
+  -> Transpose -> (B, C, W)
+  -> 并行多尺度卷积:
+      Conv1d(C -> C', k=3, pad=1) -> BN -> ReLU -> F3
+      Conv1d(C -> C', k=5, pad=2) -> BN -> ReLU -> F5
+      Conv1d(C -> C', k=7, pad=3) -> BN -> ReLU -> F7
+  -> Concat(F3, F5, F7) -> Conv1d(3C' -> C', k=1) -> ReLU -> F_fused (B, C', W)
+  -> Transpose -> (B, W, C')
+  -> Bi-GRU(C' -> H) -> H_t (B, W, 2H)
+  -> Temporal Attention: w^T * H_t -> softmax -> alpha_t
+      z_att = sum(alpha_t * H_t) -> (B, 2H)
+  -> FC(2H -> 2H) -> ReLU -> Dropout
+  -> FC(2H -> d) -> o_t (B, d)
+```
+
+**Fusion** (融合层, paper Eq. 15-16):
+```
+o_fusion = Concat(o_f, o_t) -> (B, 2d)
+logits = FC(2d -> num_classes) -> (B, num_classes)
+```
+
+**关键设计**:
+- 频谱分支: FFT 显式频谱建模 + 频带卷积 + SE 通道注意力 (自适应增强关键频带)
+- 时序分支: 多尺度卷积 (局部动态) + Bi-GRU (长程依赖) + 时序注意力 (关键时刻)
+- 语义级融合: 两分支各输出 d 维向量, 拼接后经 FC 分类
+- ADF 适配: 原论文 EEG 64 通道改为 ADF 3 通道, FFT 频带按序列长度自适应划分
 
 ### ProtoNet
 
@@ -1036,6 +1108,7 @@ L = L_sup + L_aug + τ·L_FAC + w·L_inf
 | Transformer | (B,W,C) | 71.49 K | 16.83 MMACs | 33.99 MFLOPS |
 | Mamba | (B,W,C) | ~37K* | — | — |
 | TimesNet | (B,W,C) | 2.34 M | 1.82 GMACs | 3.63 GFLOPS |
+| STAFNet | (B,W,C) | ~51.5 K | — | — |
 | ProtoNet | (B×20,768) | 55.71 K | 1.66 MMACs | 3.33 MFLOPS |
 | RelationNet | (B×20,768) | 57.1 K | 1.71 MMACs | 3.44 MFLOPS |
 | MLDA | (B,768) | 481.7 K | 479.3 KMACs | 960.99 KFLOPS |
@@ -1068,7 +1141,7 @@ L = L_sup + L_aug + τ·L_FAC + w·L_inf
 
 | training_type | 训练函数 | 适用方法 |
 |:---|:---|:---|
-| _(默认)_ | `run_temporal_fold()` | LSTM, Transformer, Mamba, TimesNet |
+| _(默认)_ | `run_temporal_fold()` | LSTM, Transformer, Mamba, TimesNet, STAFNet |
 | _(fewshot)_ | `run_fewshot_fold()` | ProtoNet, RelationNet |
 | `domain_adapt` | `run_mlda_fold()` | MLDA |
 | `domain_adapt_vit` | `run_daeevit_fold()` | DAEEGViT |
@@ -1126,6 +1199,7 @@ python -m pytest tests/test_interpcnn.py::TestArchitecture -v
 - **Transformer**: Vaswani et al. *Attention Is All You Need*. NeurIPS, 2017.
 - **Mamba**: Gu & Dao. *Mamba: Linear-Time Sequence Modeling with Selective State Spaces*. 2023.
 - **TimesNet**: Wu et al. *TimesNet: Temporal 2D-Variation Modeling for General Time Series Analysis*. ICLR, 2023.
+- **STAFNet**: Wu et al. *A Dual-Branch Spectral-Temporal Attention Fusion Network for EEG-Based Driving Fatigue Detection*. IEEE Transactions on Instrumentation and Measurement, vol. 75, 2026. DOI: 10.1109/TIM.2026.3652735.
 - **ProtoNet**: Snell et al. *Prototypical Networks for Few-shot Learning*. NeurIPS, 2017.
 - **RelationNet**: Sung et al. *Learning to Compare: Relation Network for Few-Shot Learning*. CVPR, 2018.
 - **MLDA**: Huang et al. *Multi-level domain adaptation for improved generalization in electroencephalogram-based driver fatigue detection*. Engineering Applications of Artificial Intelligence, 2025.

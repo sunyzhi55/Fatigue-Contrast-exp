@@ -20,3 +20,4 @@ from models.dann_model import *
 from models.deepcoral_model import *
 from models.interpcnn_model import *
 from models.afmcir_model import *
+from models.stafnet_model import *

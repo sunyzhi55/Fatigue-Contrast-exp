@@ -20,7 +20,7 @@ DATA_DIR = "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreproces
 BATCH_SIZE = 128
 EPOCHS = 200
 PATIENCE = 200
-VAL_STRATEGY = "loso"  # 验证策略：kfold 或 loso
+VAL_STRATEGY = "kfold"  # 验证策略：kfold 或 loso
 DIFFICULTY = "easy"  # 数据类别（easy / hard）
 fatigue_temporal_experiments = {
 
@@ -155,7 +155,7 @@ fatigue_temporal_experiments = {
         "niter": 50,
 
         # ---- 系统 ----
-        "device": "cuda:1",
+        "device": "cuda:0",
         "seed": 42,
         "output_dir": "./result",
 
@@ -224,7 +224,7 @@ fatigue_temporal_experiments = {
         "niter": 50,
 
         # ---- 系统 ----
-        "device": "cuda:3",
+        "device": "cuda:0",
         "seed": 42,
         "output_dir": "./result",
 
@@ -293,13 +293,85 @@ fatigue_temporal_experiments = {
         "niter": 50,
 
         # ---- 系统 ----
-        "device": "cuda:6",
+        "device": "cuda:0",
         "seed": 42,
         "output_dir": "./result",
 
         # ---- SwanLab ----
         "use_swanlab": False,
         "swanlab_description": "Fatigue Detection - TimesNet Baseline (ICLR 2023)",
+        "swanlab_num_samples": 8,
+    },
+
+    # ====================================================================== #
+    #                    STAFNet 双分支频谱-时序融合 (IEEE TIM 2026)              #
+    # ====================================================================== #
+    "Fatigue_STAFNet_baseline": {
+        # ---- 模型 ----
+        "model_name": "stafnet",
+        "num_classes": 2,
+        "checkpoint_path": None,
+
+        # STAFNet 特有参数
+        "spectral_channels": 8,      # 每个频带的输出通道数 C'
+        "num_bands": 5,              # 频带数量 K (delta, theta, alpha, beta, gamma)
+        "se_reduction": 4,           # SE 通道注意力压缩比
+        "temporal_channels": 16,     # 多尺度卷积输出通道数 C'
+        "gru_hidden": 64,            # Bi-GRU 单向隐藏层大小 H
+        "gru_layers": 1,             # GRU 层数
+        "branch_output_dim": 2,      # 分支输出维度 d
+        "dropout": 0.1,
+
+        # ---- 数据 ----
+        "dataset_name": "FatigueDetection",
+        "data_dir": DATA_DIR,
+
+        # 特征与窗口
+        "feature_name": "deviation_px_before_calibrate",
+        "window_size": 256,
+        "stride": 64,
+        # ADF 三通道特征: 空间漂移 + 一阶时序差分 + 滑动窗口局部均值
+        "use_adf": True,
+        "local_mean_size": 16,
+
+        # ---- 数据划分 ----
+        "difficulty": DIFFICULTY,
+        "test_ids": None,
+        "folds": {
+            1: {"val_ids": ["01", "05", "14", "19"]},
+            2: {"val_ids": ["02", "06", "10", "15"]},
+            3: {"val_ids": ["07", "11", "16", "20"]},
+            4: {"val_ids": ["03", "08", "12", "17"]},
+            5: {"val_ids": ["04", "09", "13", "18"]},
+        },
+
+        # ---- 训练 ----
+        "trainer_name": "TrainerForFatigue",
+        "loss_fn_name": "CrossEntropyLoss",
+        "label_smoothing": 0.1,
+        "optimizer_name": "AdamW",
+
+        "batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "patience": PATIENCE,
+        "k_fold": 5,
+        "val_strategy": VAL_STRATEGY,
+
+        # ---- 超参数 ----
+        "lr": 3e-4,
+        "weight_decay": 1e-4,
+        "lr_policy": "cosine",
+        "lr_decay": 0.95,
+        "niter": 50,
+
+        # ---- 系统 ----
+        "device": "cuda:0",
+        "seed": 42,
+        "output_dir": "./result",
+
+        # ---- SwanLab ----
+        "use_swanlab": False,
+        "swanlab_description": "Fatigue Detection - STAFNet (IEEE TIM 2026)",
         "swanlab_num_samples": 8,
     },
 }

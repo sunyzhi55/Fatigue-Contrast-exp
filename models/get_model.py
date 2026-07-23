@@ -195,6 +195,24 @@ def get_model(model_name, num_class, pretrained_path, device, **kwargs):
         )
         model = model.to(device)
 
+    # ======================== 双分支频谱-时序融合模型 ======================== #
+    elif model_name == 'stafnet':
+        from models.stafnet_model import STAFNetClassifier
+        model = STAFNetClassifier(
+            input_size=kwargs.get('input_size', 3),
+            seq_len=kwargs.get('seq_len', 256),
+            num_classes=num_class,
+            spectral_channels=kwargs.get('spectral_channels', 8),
+            num_bands=kwargs.get('num_bands', 5),
+            se_reduction=kwargs.get('se_reduction', 4),
+            temporal_channels=kwargs.get('temporal_channels', 16),
+            gru_hidden=kwargs.get('gru_hidden', 64),
+            gru_layers=kwargs.get('gru_layers', 1),
+            branch_output_dim=kwargs.get('branch_output_dim', 2),
+            dropout=kwargs.get('dropout', 0.1),
+        )
+        model = model.to(device)
+
     else:
         raise ValueError(f"Model name '{model_name}' is not recognized.")
 

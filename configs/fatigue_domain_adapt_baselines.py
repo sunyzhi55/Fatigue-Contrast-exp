@@ -47,7 +47,7 @@ BATCH_SIZE = 128
 EPOCHS = 200
 PATIENCE = 200
 DIFFICULTY = "easy"  # 数据类别（easy / hard）
-VAL_STRATEGY = "loso"  # 验证策略：kfold 或 loso
+VAL_STRATEGY = "kfold"  # 验证策略：kfold 或 loso
 fatigue_da_experiments = {
 
     # ====================================================================== #
@@ -193,7 +193,7 @@ fatigue_da_experiments = {
         "mmd_weight": 1.0,           # MMD 损失权重 (论文 Eq.8: L = L_cls + L_mmd)
 
         # ---- 系统 ----
-        "device": "cuda:1",
+        "device": "cuda:0",
         "seed": 42,
         "output_dir": "./result",
 
@@ -263,7 +263,7 @@ fatigue_da_experiments = {
         "da_warmup_scale": 10.0,      # sigmoid 预热陡峭度 (原论文=10)
 
         # ---- 系统 ----
-        "device": "cuda:2",
+        "device": "cuda:0",
         "seed": 42,
         "output_dir": "./result",
 
@@ -333,7 +333,7 @@ fatigue_da_experiments = {
         "dann_gamma": 10.0,          # GRL sigmoid 调度陡峭度 (论文 Eq.9: γ=10)
 
         # ---- 系统 ----
-        "device": "cuda:3",
+        "device": "cuda:0",
         "seed": 42,
         "output_dir": "./result",
 
@@ -402,7 +402,7 @@ fatigue_da_experiments = {
         "coral_weight": 1.0,         # CORAL 损失权重 (论文 Eq.2: λ)
 
         # ---- 系统 ----
-        "device": "cuda:6",
+        "device": "cuda:0",
         "seed": 42,
         "output_dir": "./result",
 

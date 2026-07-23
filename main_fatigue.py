@@ -2,7 +2,7 @@
 疲劳检测对比实验训练脚本
 
 支持的实验类型:
-- 时序基线: LSTM, Transformer, Mamba, TimesNet
+- 时序基线: LSTM, Transformer, Mamba, TimesNet, STAFNet
 - 小样本学习: ProtoNet, RelationNet
 - 域适应: MLDA, DAEEGViT, LA-MSDA, DANN, DeepCORAL
 - 域泛化: InterpretableCNN, AFM-CIR
@@ -19,6 +19,7 @@
     python main_fatigue.py --exp_name Fatigue_DANN_baseline
     python main_fatigue.py --exp_name Fatigue_DeepCORAL_baseline
     python main_fatigue.py --exp_name Fatigue_TimesNet_baseline
+    python main_fatigue.py --exp_name Fatigue_STAFNet_baseline
     python main_fatigue.py --exp_name Fatigue_AFM_CIR_baseline
 """
 import sys
@@ -153,6 +154,14 @@ def build_model_with_kwargs(args, device):
         "num_kernels": getattr(args, "num_kernels", 6),
         "top_k": getattr(args, "top_k", 3),
         "e_layers": getattr(args, "e_layers", 2),
+        # STAFNet 特有参数
+        "spectral_channels": getattr(args, "spectral_channels", 8),
+        "num_bands": getattr(args, "num_bands", 5),
+        "se_reduction": getattr(args, "se_reduction", 4),
+        "temporal_channels": getattr(args, "temporal_channels", 16),
+        "gru_hidden": getattr(args, "gru_hidden", 64),
+        "gru_layers": getattr(args, "gru_layers", 1),
+        "branch_output_dim": getattr(args, "branch_output_dim", 2),
     }
     return get_model(
         args.model_name, args.num_classes,

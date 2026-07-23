@@ -111,7 +111,8 @@ class GaipatDataset(Dataset):
 
             # 标签过滤: 仅保留 0 (distracted) 和 1 (focused)
             try:
-                label = int(label_str)
+                # GAIPAT 数据集的标签规则是 0=分心, 1=专注, 2/3=丢弃，反转后得到 1=分心, 0=专注
+                label = (int(label_str) + 1) % 2  # 将 0/1 标签进行反转，映射为 1/0
             except ValueError:
                 continue
             if label not in (0, 1):
