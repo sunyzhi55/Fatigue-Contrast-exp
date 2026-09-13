@@ -19,11 +19,14 @@ AFM-CIR 说明:
     - 核心: 自适应傅里叶 Mixup + FAC 关联因子化 + 对抗掩码
     - 参考论文: Zhu et al. "Causality-Preserving Domain Generalization
       via Adaptive Fourier Mixup for RUL Prediction." IEEE TPAMI, 2026.
+
+# /root/autodl-tmp/shenxy/Data/Process0620_calibrate
+# /data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate
 """
 
 
 DATA_DIR = "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate"
-BATCH_SIZE = 128
+BATCH_SIZE = 16
 EPOCHS = 200
 PATIENCE = 200
 VAL_STRATEGY = "kfold"  # 验证策略：kfold 或 loso

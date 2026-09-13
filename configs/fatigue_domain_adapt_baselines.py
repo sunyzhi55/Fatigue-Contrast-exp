@@ -43,7 +43,7 @@
 """
 
 DATA_DIR = "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate"
-BATCH_SIZE = 128
+BATCH_SIZE = 16
 EPOCHS = 200
 PATIENCE = 200
 DIFFICULTY = "easy"  # 数据类别（easy / hard）

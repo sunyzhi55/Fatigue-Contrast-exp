@@ -147,6 +147,21 @@ def build_all_models():
     except Exception as e:
         print(f"  [SKIP] TimesNet: {e}")
 
+    try:
+        mod = _load("stafnet_model")
+        models["STAFNet"] = (
+            mod.STAFNetClassifier(
+                input_size=C, seq_len=W, num_classes=2,
+                spectral_channels=8, num_bands=5, se_reduction=4,
+                temporal_channels=16, gru_hidden=64, gru_layers=1,
+                branch_output_dim=2, dropout=0.1,
+            ).to(device),
+            (torch.randn(B, W, C),),
+            "(B,W,C)",
+        )
+    except Exception as e:
+        print(f"  [SKIP] STAFNet: {e}")
+
     # ---- 小样本学习 ----
     try:
         mod = _load("protonet")
@@ -263,7 +278,7 @@ def build_all_models():
         models["AFM-CIR"] = (
             mod.AFMCIRNet(
                 in_channels=C, seq_len=W, num_classes=2,
-                feat_dim=64, dropout=0.1, adv_hidden=64, kappa=0.8,
+                feat_dim=512, dropout=0.1, adv_hidden=256, kappa=0.8,
             ).to(device),
             (torch.randn(B, C, W),),
             "(B,C,W)",
@@ -296,7 +311,7 @@ def main():
                 model=model,
                 args=list(args),
                 output_as_string=True,
-                output_precision=2,
+                output_precision=3,
                 print_results=False,
                 print_detailed=False,
             )

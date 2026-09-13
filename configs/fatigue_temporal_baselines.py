@@ -14,10 +14,14 @@
     - folds: K-Fold 配置，每个fold指定验证集受试者ID
     - window_size / stride: 滑动窗口参数
     - feature_name: 使用的特征字段
+
+    
+# /root/autodl-tmp/shenxy/Data/Process0620_calibrate
+# /data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate
 """
 
 DATA_DIR = "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate"
-BATCH_SIZE = 128
+BATCH_SIZE = 16
 EPOCHS = 200
 PATIENCE = 200
 VAL_STRATEGY = "kfold"  # 验证策略：kfold 或 loso

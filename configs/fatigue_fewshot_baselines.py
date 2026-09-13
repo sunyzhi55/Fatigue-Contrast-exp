@@ -12,9 +12,13 @@
     - k_shot: 每个类别的支持集样本数
     - n_query: 每个类别的查询集样本数
     - episodes_per_epoch: 每个 epoch 的 episode 数量
+
+    
+# /root/autodl-tmp/shenxy/Data/Process0620_calibrate
+# /data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate
 """
 DATA_DIR = "/data3/wangchangmiao/shenxy/Code/gaze/FatigueGuardData/Datapreprocess_l2cs/Data0620_tf_calibrate"
-BATCH_SIZE = 128
+BATCH_SIZE = 16
 EPOCHS = 200
 PATIENCE = 200
 VAL_STRATEGY = "kfold"  # 验证策略：kfold 或 loso

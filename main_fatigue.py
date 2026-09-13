@@ -598,6 +598,11 @@ def run_fewshot_fold(args, device, fold_idx, fold_config, recorder=None):
     # ---- 构建数据集 ----
     train_dataset = build_fold_data(args, fold_config, mode="train")
     val_dataset = build_fold_data(args, fold_config, mode="val")
+    # GAIPAT 数据集需要包装为 FewShot 接口
+    if isinstance(train_dataset, GaipatDataset):
+        train_dataset = GaipatFewShotAdapter(train_dataset)
+    if isinstance(val_dataset, GaipatDataset):
+        val_dataset = GaipatFewShotAdapter(val_dataset)
 
     train_loader = build_fewshot_loader(
         train_dataset, n_way, k_shot, n_query, episodes_per_epoch
@@ -1116,7 +1121,7 @@ def run_lamsda_fold(args, device, fold_idx, fold_config, recorder=None):
             torch.from_numpy(bcw), torch.from_numpy(labels)
         )
         loader = torch.utils.data.DataLoader(
-            dset, batch_size=args.batch_size, shuffle=True, drop_last=True
+            dset, batch_size=args.batch_size, shuffle=True, drop_last=False
         )
         source_loaders.append(loader)
 
@@ -1128,7 +1133,7 @@ def run_lamsda_fold(args, device, fold_idx, fold_config, recorder=None):
         torch.from_numpy(tar_bcw), torch.from_numpy(tar_labels)
     )
     tar_loader = torch.utils.data.DataLoader(
-        tar_dset, batch_size=args.batch_size, shuffle=True, drop_last=True
+        tar_dset, batch_size=args.batch_size, shuffle=True, drop_last=False
     )
     eval_loader = torch.utils.data.DataLoader(
         tar_dset, batch_size=args.batch_size, shuffle=False
@@ -2238,7 +2243,6 @@ def batch_evaluate_folds(args, device, recorder=None):
 
     # ---- 汇总 ----
     if all_fold_metrics:
-        import numpy as np
         print(f"\n{'='*60}")
         print("📊 测试集汇总结果（所有 Fold）")
         print(f"{'='*60}")
